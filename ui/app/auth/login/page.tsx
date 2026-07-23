@@ -5,9 +5,9 @@ import { EnhancedGlassCard } from "@/components/ui/enhanced-glass-card"
 import { EnhancedGlassInput } from "@/components/ui/enhanced-glass-input"
 import { ThemeToggle } from "@/components/ui/theme-toggle"
 import { useAppStore } from "@/lib/store"
-import { signIn, signUp, signInWithGoogle } from "@/lib/auth"
+import { signIn, signUp, signInWithGoogle, signInWithGithub } from "@/lib/auth"
 import { motion, AnimatePresence } from "framer-motion"
-import { Brain, Chrome, Users, GraduationCap, Mail, Lock, User, ArrowLeft } from "lucide-react"
+import { Brain, Chrome, Github, Users, GraduationCap, Mail, Lock, User, ArrowLeft } from "lucide-react"
 import { useRouter } from "next/navigation"
 import { useState } from "react"
 import { toast } from "sonner"
@@ -117,16 +117,34 @@ export default function AuthPage() {
 
   const handleGoogleAuth = async () => {
     setIsLoading(true)
-    
+
     try {
       const { error } = await signInWithGoogle()
-      
+
       if (error) {
         const message = error instanceof Error ? error.message : 'Failed to sign in with Google'
         toast.error(message)
       }
     } catch (error) {
       console.error('Google auth error:', error)
+      toast.error('Something went wrong')
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  const handleGithubAuth = async () => {
+    setIsLoading(true)
+
+    try {
+      const { error } = await signInWithGithub()
+
+      if (error) {
+        const message = error instanceof Error ? error.message : 'Failed to sign in with GitHub'
+        toast.error(message)
+      }
+    } catch (error) {
+      console.error('GitHub auth error:', error)
       toast.error('Something went wrong')
     } finally {
       setIsLoading(false)
@@ -348,17 +366,29 @@ export default function AuthPage() {
             </div>
           </div>
 
-          {/* Google Auth */}
-          <EnhancedGlassButton
-            type="button"
-            onClick={handleGoogleAuth}
-            fullWidth
-            loading={isLoading}
-            icon={<Chrome className="w-5 h-5" />}
-            size="lg"
-          >
-            Google
-          </EnhancedGlassButton>
+          {/* OAuth providers */}
+          <div className="grid grid-cols-2 gap-3">
+            <EnhancedGlassButton
+              type="button"
+              onClick={handleGoogleAuth}
+              fullWidth
+              loading={isLoading}
+              icon={<Chrome className="w-5 h-5" />}
+              size="lg"
+            >
+              Google
+            </EnhancedGlassButton>
+            <EnhancedGlassButton
+              type="button"
+              onClick={handleGithubAuth}
+              fullWidth
+              loading={isLoading}
+              icon={<Github className="w-5 h-5" />}
+              size="lg"
+            >
+              GitHub
+            </EnhancedGlassButton>
+          </div>
 
           {/* Footer */}
           <div className="text-center text-sm text-muted-foreground">
