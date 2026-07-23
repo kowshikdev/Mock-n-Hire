@@ -25,27 +25,36 @@ export default function AuthCallback() {
 
         if (data.session?.user) {
           console.log('Auth callback - User ID:', data.session.user.id)
-          
-          // Get user profile with retry
-          const { profile, error: profileError } = await fetchUserWithRetry(data.session.user.id)
 
-          if (profileError) {
+          // Get user profile with retry. First-time OAuth sign-ins (Google/
+          // GitHub) never go through signUp()'s explicit insert into
+          // `users`, so this legitimately has no row yet -- that's not a
+          // failure, it means the user needs to pick a role once.
+          try {
+            const { profile } = await fetchUserWithRetry(data.session.user.id)
+
+            if (profile) {
+              setUser({
+                id: profile.user_id,
+                email: profile.email,
+                name: profile.name,
+                role: profile.role
+              })
+
+              toast.success('Successfully signed in!')
+              router.push(`/dashboard/${profile.role}`)
+              return
+            }
+          } catch (profileError: any) {
+            if (profileError?.code === 'PGRST116') {
+              // No `users` row yet -- first OAuth sign-in for this account.
+              router.push('/auth/select-role')
+              return
+            }
             console.error('Profile fetch error:', profileError)
             toast.error('Failed to load profile')
             router.push('/auth/login')
             return
-          }
-
-          if (profile) {
-            setUser({
-              id: profile.user_id,
-              email: profile.email,
-              name: profile.name,
-              role: profile.role
-            })
-            
-            toast.success('Successfully signed in!')
-            router.push(`/dashboard/${profile.role}`)
           }
         } else {
           router.push('/auth/login')
