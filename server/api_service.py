@@ -8,7 +8,6 @@ import os
 import shutil
 import json
 import uuid
-import jwt
 import io
 import csv
 import mimetypes
@@ -54,16 +53,25 @@ for d in (RESUME_FOLDER, UPLOAD_FOLDER, PROCESSED_DATA_FOLDER):
     os.makedirs(d, exist_ok=True)
 
 # ─── Auth helper ─────────────────────────────────────────
+# Was: jwt.decode(token, options={"verify_signature": False}) -- the
+# signature was never checked, so any caller could forge a token claiming
+# to be any user_id, and every valid-looking token was treated as a
+# recruiter regardless of who actually signed up. supabase.auth.get_user()
+# calls Supabase Auth's own verification (signature + expiry), and role
+# comes from the real value set at signup (lib/auth.ts's signUp() writes
+# role into both the users table and the auth user's user_metadata).
 def get_current_user(authorization: str = Header(...)):
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Not authenticated")
+    token = authorization.split(" ", 1)[1]
     try:
-        token = authorization.split(" ")[1]
-        decoded = jwt.decode(token, options={"verify_signature": False})
-        user_id = decoded.get("sub")
-        return {"user_id": user_id, "role": "recruiter"}
+        result = supabase.auth.get_user(token)
     except Exception:
-        raise HTTPException(status_code=401, detail="Invalid token")
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    if not result or not result.user:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    role = (result.user.user_metadata or {}).get("role")
+    return {"user_id": result.user.id, "role": role}
 
 # ─── Job status ──────────────────────────────────────────
 def insert_job_status(job_id: str):

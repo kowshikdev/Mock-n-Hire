@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends, Body, File, UploadFile
 from pydantic import BaseModel
 from api.dependencies import get_supabase, get_groq_service, get_whisper_service, get_report_service
+from api.auth import get_current_user, require_self, require_session_owner
 from utils.supabase_utils import upload_file, download_file
 from utils.pdf_utils import extract_text_from_pdf
 from models.schemas import Question, NextQuestionResponse, FinalReportResponse, UserSummaryResponse
@@ -27,7 +28,7 @@ async def root():
     }
 
 @router.get("/test-supabase")
-async def test_supabase(supabase=Depends(get_supabase)):
+async def test_supabase(supabase=Depends(get_supabase), current_user: dict = Depends(get_current_user)):
     try:
         valid_user_id = "386b7b8e-6242-424f-aad8-9e02ae93678e"
         response = supabase.table("mock_interview_users").upsert({
@@ -41,7 +42,7 @@ async def test_supabase(supabase=Depends(get_supabase)):
         raise HTTPException(status_code=500, detail=f"Supabase error: {str(e)}")
 
 @router.post("/upload-resume/{mock_user_id}")
-async def upload_resume(mock_user_id: str, file: UploadFile = File(...), supabase=Depends(get_supabase)):
+async def upload_resume(mock_user_id: str, file: UploadFile = File(...), supabase=Depends(get_supabase), current_user: dict = Depends(require_self)):
     try:
         try:
             uuid.UUID(mock_user_id)
@@ -91,7 +92,7 @@ async def upload_resume(mock_user_id: str, file: UploadFile = File(...), supabas
         raise HTTPException(status_code=500, detail=f"Error uploading resume: {str(e)}")
 
 @router.post("/generate-questions/{mock_user_id}/{resume_id}")
-async def generate_questions(mock_user_id: str, resume_id: str, supabase=Depends(get_supabase), groq_service=Depends(get_groq_service)):
+async def generate_questions(mock_user_id: str, resume_id: str, supabase=Depends(get_supabase), groq_service=Depends(get_groq_service), current_user: dict = Depends(require_self)):
     try:
         try:
             uuid.UUID(mock_user_id)
@@ -108,6 +109,9 @@ async def generate_questions(mock_user_id: str, resume_id: str, supabase=Depends
         if not resume_data.data:
             logger.warning(f"Resume not found for resume_id: {resume_id}")
             raise HTTPException(status_code=404, detail="Resume not found")
+        if resume_data.data[0]["user_id"] != mock_user_id:
+            logger.warning(f"Resume {resume_id} does not belong to user {mock_user_id}")
+            raise HTTPException(status_code=403, detail="Not authorized for this resume")
 
         file_path = resume_data.data[0]["file_path"]
         file_response = download_file("mock.interview.resumes", file_path)
@@ -141,7 +145,7 @@ async def generate_questions(mock_user_id: str, resume_id: str, supabase=Depends
         raise HTTPException(status_code=500, detail=f"Error generating questions: {str(e)}")
 
 @router.get("/next-question/{session_id}/{question_number}", response_model=NextQuestionResponse)
-async def get_next_question(session_id: str, question_number: int, supabase=Depends(get_supabase)):
+async def get_next_question(session_id: str, question_number: int, supabase=Depends(get_supabase), current_user: dict = Depends(require_session_owner)):
     try:
         try:
             uuid.UUID(session_id)
@@ -177,7 +181,8 @@ async def submit_answer(
     payload: AnswerPayload | None = Body(None, embed=True),
     supabase=Depends(get_supabase),
     groq_service=Depends(get_groq_service),
-    whisper_service=Depends(get_whisper_service)
+    whisper_service=Depends(get_whisper_service),
+    current_user: dict = Depends(require_session_owner)
 ):
     # Build audio path
     audio_path = f"answers/{session_id}/{question_number}/audio.webm"
@@ -253,7 +258,7 @@ async def submit_answer(
 
 
 @router.get("/final-report/{session_id}", response_model=FinalReportResponse)
-async def get_final_report(session_id: str, report_service=Depends(get_report_service)):
+async def get_final_report(session_id: str, report_service=Depends(get_report_service), current_user: dict = Depends(require_session_owner)):
     try:
         try:
             uuid.UUID(session_id)
@@ -270,7 +275,7 @@ async def get_final_report(session_id: str, report_service=Depends(get_report_se
         raise HTTPException(status_code=500, detail=f"Error generating final report: {str(e)}")
 
 @router.get("/user-summary/{mock_user_id}", response_model=UserSummaryResponse)
-async def get_user_summary(mock_user_id: str, report_service=Depends(get_report_service)):
+async def get_user_summary(mock_user_id: str, report_service=Depends(get_report_service), current_user: dict = Depends(require_self)):
     try:
         try:
             uuid.UUID(mock_user_id)

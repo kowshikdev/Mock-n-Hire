@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends
 from api.dependencies import get_supabase, get_whisper_service
+from api.auth import require_session_owner
 import logging
 import os
 import uuid
@@ -33,6 +34,7 @@ async def analyze_stress(
     question_number: int,
     supabase=Depends(get_supabase),
     whisper_service=Depends(get_whisper_service),
+    current_user: dict = Depends(require_session_owner),
 ):
     # Short buffer so frontend finishes upload (safe for concurrency)
     await asyncio.sleep(5)
@@ -112,7 +114,7 @@ async def analyze_stress(
     return {"stress_score": stress, "stress_level": level}
 
 @router.get("/average-stress/{session_id}")
-async def average_stress(session_id: str, supabase=Depends(get_supabase)):
+async def average_stress(session_id: str, supabase=Depends(get_supabase), current_user: dict = Depends(require_session_owner)):
     # Validate UUID
     try:
         uuid.UUID(session_id)
