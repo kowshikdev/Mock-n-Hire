@@ -101,7 +101,7 @@ export const signIn = async (email: string, password: string) => {
       return { data: { ...data, profile }, error: null }
     }
 
-    return { data, error: null }
+    return { data: { ...data, profile: null }, error: null }
   } catch (error) {
     console.error('Sign in error:', error)
     return { data: null, error }

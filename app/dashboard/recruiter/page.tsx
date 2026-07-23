@@ -12,7 +12,7 @@ import {
 import { useEffect, useState } from "react";
 import { NewScreeningModal } from "./components/new-screening-modal";
 import { createClientComponentClient } from "@supabase/auth-helpers-nextjs";
-import type { Database } from "@/lib/database.types";
+import type { Database } from "@/lib/supabase";
 
 type Row = {
   job_id   : string;

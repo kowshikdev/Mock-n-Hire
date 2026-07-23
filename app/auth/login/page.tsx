@@ -122,7 +122,8 @@ export default function AuthPage() {
       const { error } = await signInWithGoogle()
       
       if (error) {
-        toast.error(error.message || 'Failed to sign in with Google')
+        const message = error instanceof Error ? error.message : 'Failed to sign in with Google'
+        toast.error(message)
       }
     } catch (error) {
       console.error('Google auth error:', error)
