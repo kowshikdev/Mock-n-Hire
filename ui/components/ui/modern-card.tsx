@@ -4,7 +4,7 @@ import { cn } from "@/lib/utils"
 import { motion } from "framer-motion"
 import { forwardRef, ReactNode } from "react"
 
-interface ModernCardProps extends React.HTMLAttributes<HTMLDivElement> {
+interface ModernCardProps extends Omit<React.HTMLAttributes<HTMLDivElement>, 'onDrag' | 'onDragStart' | 'onDragEnd' | 'onAnimationStart' | 'onAnimationEnd'> {
   children: ReactNode
   hover?: boolean
   interactive?: boolean

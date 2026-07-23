@@ -1,95 +1,98 @@
-"use client"
+"use client";
+import { useAppStore } from "@/lib/store";
+import { cn } from "@/lib/utils";
+import { signOut } from "@/lib/auth";
+import { motion, AnimatePresence } from "framer-motion";
+import { Brain, LogOut, Settings, User, Menu, X, Bell, Search } from "lucide-react";
+import Link from "next/link";
+import { useRouter, usePathname } from "next/navigation";
+import { toast } from "sonner";
+import { ThemeToggle } from "@/components/ui/theme-toggle";
+import { useState, useEffect } from "react";
+import { ModernButton } from "@/components/ui/modern-button";
 
-import { useAppStore } from "@/lib/store"
-import { cn } from "@/lib/utils"
-import { signOut } from "@/lib/auth"
-import { motion, AnimatePresence } from "framer-motion"
-import { Brain, LogOut, Settings, User, Menu, X, Bell, Search } from "lucide-react" 
-import Link from "next/link"
-import { useRouter, usePathname } from "next/navigation"
-import { toast } from "sonner"
-import { ThemeToggle } from "@/components/ui/theme-toggle"
-import { useState, useEffect } from "react"
-import { ModernButton } from "@/components/ui/modern-button"
 
 export function Navbar() {
-  const { user, setUser } = useAppStore()
-  const router = useRouter()
-  const pathname = usePathname()
-  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false)
-  const [isScrolled, setIsScrolled] = useState(false)
-
-  // Don't show navbar on landing page or auth pages
-  if (!user || pathname === '/' || pathname.startsWith('/auth/')) {
-    return null
-  }
+  const { user, setUser } = useAppStore();
+  const router = useRouter();
+  const pathname = usePathname();
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+  const [isScrolled, setIsScrolled] = useState(false);
 
   useEffect(() => {
     const handleScroll = () => {
-      setIsScrolled(window.scrollY > 20)
-    }
+      setIsScrolled(window.scrollY > 20);
+    };
+    window.addEventListener('scroll', handleScroll, { passive: true });
+    return () => window.removeEventListener('scroll', handleScroll);
+  }, []);
 
-    window.addEventListener('scroll', handleScroll, { passive: true })
-    return () => window.removeEventListener('scroll', handleScroll)
-  }, [])
+  // Don't show navbar on landing page or auth pages
+  if (!user || pathname === '/' || pathname.startsWith('/auth/')) {
+    return null;
+  }
 
   const handleLogout = async () => {
     try {
-      await signOut()
-      setUser(null)
-      toast.success('Signed out successfully')
-      router.push('/')
+      await signOut();
+      setUser(null);
+      toast.success('Signed out successfully');
+      router.push('/');
     } catch (error) {
-      console.error('Logout error:', error)
-      toast.error('Failed to sign out')
+      console.error('Logout error:', error);
+      toast.error('Failed to sign out');
     }
-  }
+  };
 
   const navItems = [
     {
       label: 'Dashboard',
       href: `/dashboard/${user.role}`,
-      active: pathname.startsWith('/dashboard')
+      active: pathname.startsWith('/dashboard'),
     },
-    ...(user.role === 'student' ? [
-      {
-        label: 'Interview History',
-        href: '/session-history',
-        active: pathname === '/session-history'
-      }
-    ] : []),
+    ...(user.role === 'student'
+      ? [
+          {
+            label: 'Interview History',
+            href: '/session-history',
+            active: pathname === '/session-history',
+          },
+        ]
+      : []),
     {
       label: 'Settings',
       href: '/settings',
-      active: pathname === '/settings'
-    }
-  ]
+      active: pathname === '/settings',
+    },
+  ];
 
   return (
     <>
-      <motion.nav 
+      <motion.nav
         initial={{ y: -100, opacity: 0 }}
         animate={{ y: 0, opacity: 1 }}
-        transition={{ type: "spring", stiffness: 300, damping: 30 }}
+        transition={{ type: 'spring', stiffness: 300, damping: 30 }}
         className={cn(
-          "fixed top-0 left-0 right-0 z-50 transition-all duration-300",
-          isScrolled 
-            ? "py-2 backdrop-blur-md bg-background/80 border-b border-border/50" 
-            : "py-4 bg-transparent"
+          'fixed top-0 left-0 right-0 z-50 transition-all duration-300',
+          isScrolled
+            ? 'py-2 backdrop-blur-md bg-background/80 border-b border-border/50'
+            : 'py-4 bg-transparent'
         )}
       >
         <div className="container-padding">
-          <div className={cn(
-            "glass-card transition-all duration-300",
-            isScrolled ? "px-4 py-2" : "px-6 py-3"
-          )}>
+          <div
+            className={cn(
+              'glass-card transition-all duration-300',
+              isScrolled ? 'px-4 py-2' : 'px-6 py-3'
+            )}
+          >
             <div className="flex items-center justify-between">
               {/* Logo */}
-              <Link 
-                href={`/dashboard/${user.role}`} 
+              <Link
+                href={`/dashboard/${user.role}`}
                 className="flex items-center space-x-3 group focus-ring rounded-lg p-1"
               >
-                <motion.div 
+                <motion.div
                   className="flex items-center justify-center w-10 h-10 rounded-lg gradient-bg"
                   whileHover={{ scale: 1.05, rotate: 5 }}
                   whileTap={{ scale: 0.95 }}
@@ -97,11 +100,11 @@ export function Navbar() {
                   <Brain className="w-6 h-6 text-white" />
                 </motion.div>
                 <div className="hidden sm:block">
-                  <motion.h1 
+                  <motion.h1
                     className="text-xl font-bold text-foreground group-hover:gradient-text transition-all duration-300"
                     whileHover={{ scale: 1.02 }}
                   >
-                    Mock'n-Hire
+                    Mock&apos;n-Hire
                   </motion.h1>
                   <p className="text-xs text-muted-foreground">AI Hiring Suite</p>
                 </div>
@@ -118,10 +121,7 @@ export function Navbar() {
                   >
                     <Link
                       href={item.href}
-                      className={cn(
-                        "nav-link",
-                        item.active && "active"
-                      )}
+                      className={cn('nav-link', item.active && 'active')}
                     >
                       {item.label}
                     </Link>
@@ -163,12 +163,14 @@ export function Navbar() {
                   </div>
                   <div className="text-sm">
                     <span className="font-medium text-foreground">{user.name}</span>
-                    <span className={cn(
-                      "ml-2 px-2 py-0.5 text-xs rounded-full font-medium",
-                      user.role === 'recruiter' 
-                        ? "bg-blue-500/20 text-blue-600 border border-blue-500/20" 
-                        : "bg-green-500/20 text-green-600 border border-green-500/20"
-                    )}>
+                    <span
+                      className={cn(
+                        'ml-2 px-2 py-0.5 text-xs rounded-full font-medium',
+                        user.role === 'recruiter'
+                          ? 'bg-blue-500/20 text-blue-600 border border-blue-500/20'
+                          : 'bg-green-500/20 text-green-600 border border-green-500/20'
+                      )}
+                    >
                       {user.role}
                     </span>
                   </div>
@@ -179,7 +181,7 @@ export function Navbar() {
 
                 {/* Settings */}
                 <Link href="/settings">
-                  <motion.button 
+                  <motion.button
                     className="glass-button p-2 focus-ring"
                     whileHover={{ scale: 1.05, rotate: 15 }}
                     whileTap={{ scale: 0.95 }}
@@ -190,7 +192,7 @@ export function Navbar() {
                 </Link>
 
                 {/* Logout */}
-                <motion.button 
+                <motion.button
                   onClick={handleLogout}
                   className="glass-button p-2 text-red-600 hover:bg-red-500/10 focus-ring"
                   whileHover={{ scale: 1.05 }}
@@ -204,7 +206,6 @@ export function Navbar() {
               {/* Mobile Actions */}
               <div className="flex md:hidden items-center space-x-2">
                 <ThemeToggle />
-                
                 {/* Mobile Menu Toggle */}
                 <motion.button
                   onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
@@ -269,11 +270,11 @@ export function Navbar() {
                     href={item.href}
                     onClick={() => setIsMobileMenuOpen(false)}
                     className={cn(
-                      "block px-4 py-3 rounded-lg text-sm font-medium transition-all duration-200",
-                      "hover:bg-accent hover:text-accent-foreground focus-ring",
-                      item.active 
-                        ? "bg-primary/10 text-primary border border-primary/20" 
-                        : "text-muted-foreground"
+                      'block px-4 py-3 rounded-lg text-sm font-medium transition-all duration-200',
+                      'hover:bg-accent hover:text-accent-foreground focus-ring',
+                      item.active
+                        ? 'bg-primary/10 text-primary border border-primary/20'
+                        : 'text-muted-foreground'
                     )}
                   >
                     {item.label}
@@ -287,14 +288,13 @@ export function Navbar() {
                   variant="ghost"
                   size="sm"
                   onClick={() => {
-                    router.push('/settings')
-                    setIsMobileMenuOpen(false)
+                    router.push('/settings');
+                    setIsMobileMenuOpen(false);
                   }}
                   icon={<Settings className="w-4 h-4" />}
                 >
                   Settings
                 </ModernButton>
-                
                 <ModernButton
                   variant="destructive"
                   size="sm"
@@ -322,5 +322,5 @@ export function Navbar() {
         )}
       </AnimatePresence>
     </>
-  )
+  );
 }

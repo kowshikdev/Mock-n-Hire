@@ -5,7 +5,7 @@ import { forwardRef, ReactNode, useState } from "react"
 import { motion, AnimatePresence } from "framer-motion"
 import { Eye, EyeOff, AlertCircle, CheckCircle } from "lucide-react"
 
-interface ModernInputProps extends React.InputHTMLAttributes<HTMLInputElement> {
+interface ModernInputProps extends Omit<React.InputHTMLAttributes<HTMLInputElement>, 'onDrag' | 'onDragStart' | 'onDragEnd' | 'onAnimationStart' | 'onAnimationEnd'> {
   label?: string
   error?: string
   hint?: string

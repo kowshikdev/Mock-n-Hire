@@ -4,10 +4,6 @@ const nextConfig = {
     ignoreDuringBuilds: true,
   },
   images: { unoptimized: true },
-  server: {
-    allowedHosts: true,
-    host: true,
-  },
 };
 
 module.exports = nextConfig;

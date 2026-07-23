@@ -1,29 +1,38 @@
 import { supabase } from './supabase'
 
-export async function fetchCurrentUser(userId: string, maxRetries = 10) {
-  for (let i = 0; i < maxRetries; i++) {
-    const { data: profile, error } = await supabase
+export async function fetchCurrentUser(user_id: string, maxAttempts = 10) {
+  console.log('Fetching user with ID:', user_id)
+  
+  for (let i = 0; i < maxAttempts; i++) {
+    const { data, error } = await supabase
       .from('users')
       .select('*')
-      .eq('user_id', userId)
-      .single()
+      .eq('user_id', user_id)
+      .maybeSingle()  // never 406
 
-    if (profile && !error) {
-      return {
-        id: profile.user_id,
-        email: profile.email,
-        name: profile.name,
-        role: profile.role
-      }
+    if (error) {
+      console.warn(`Attempt ${i + 1}/${maxAttempts} failed:`, error)
     }
-
-    if (error && !error.message.includes('JSON object requested')) {
-      throw error
+    
+    if (data) {
+      console.log('Successfully fetched user:', data)
+      return data
     }
-
-    // Wait 300ms before retrying
-    await new Promise(resolve => setTimeout(resolve, 300))
+    
+    if (i < maxAttempts - 1) {
+      console.log(`Retrying in 300ms... (${i + 1}/${maxAttempts})`)
+      await new Promise(r => setTimeout(r, 300))  // 300ms back-off
+    }
   }
+  
+  throw new Error('User row not found after retry loop')
+}
 
-  throw new Error('Profile not found after maximum retries')
+// Test helper for development
+if (typeof window !== 'undefined') {
+  (window as any).testFetch = (id: string) => supabase
+    .from('users')
+    .select('*')
+    .eq('user_id', id)
+    .single()
 }

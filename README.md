@@ -14,7 +14,7 @@ Here is a look at the Mock'n-Hire platform in action.
 
 | Recruiter Dashboard | Candidate Screening & Analysis |
 | :---: | :---: |
-| ![Recruiter dashboard showing screening campaigns](Recruiter.png) | ![Detailed candidate view with score breakdown](Screening.png) |
+| ![Recruiter dashboard showing screening campaigns](assets/Recruiter.png) | ![Detailed candidate view with score breakdown](assets/Screening.png) |
 
 ***
 
@@ -68,10 +68,10 @@ Follow these instructions to set up and run the project locally.
     cd mock-n-hire
     ```
 
-2.  **Setup the Backend:**
+2.  **Setup the Backend (`api/`):**
     ```bash
-    # Navigate to the server directory
-    cd server
+    # Navigate to the backend directory
+    cd api
 
     # Create and activate a virtual environment
     python -m venv venv
@@ -81,29 +81,29 @@ Follow these instructions to set up and run the project locally.
     pip install -r requirements.txt
     ```
 
-3.  **Setup the Frontend:**
+3.  **Setup the Frontend (`ui/`):**
     ```bash
-    # Navigate back to the root directory
-    cd ..
+    # From the repo root, navigate to the frontend directory
+    cd ui
 
     # Install Node.js dependencies
     npm install
     ```
 
 4.  **Environment Variables:**
-    * Create a `.env.local` file in the root directory for the frontend and add your Supabase project URL and anon key.
-    * Create a `.env` file in the `server/` directory for the backend with any necessary API keys.
+    * Create a `.env.local` file in `ui/` for the frontend and add your Supabase project URL and anon key.
+    * Create a `.env` file in `api/` for the backend with any necessary API keys.
 
 ### Running the Application
 
 1.  **Start the Backend Server:**
-    * From the `server/` directory, run the FastAPI application.
+    * From `api/`, run the FastAPI application (recruiter service).
     ```bash
-    uvicorn main:app --reload
+    uvicorn api_service:app --reload
     ```
 
 2.  **Start the Frontend Development Server:**
-    * In a new terminal, run the Next.js app from the root directory.
+    * In a new terminal, from `ui/`, run the Next.js app.
     ```bash
     npm run dev
     ```
@@ -113,19 +113,21 @@ Follow these instructions to set up and run the project locally.
 
 ## 📁 File Structure
 
-Here is an overview of the key files in the project repository:
+This is a monorepo: a Next.js frontend (`ui/`) and a FastAPI backend (`api/`)
+in one repository.
 ```
 .
-├── app/          # Core Next.js pages and routing
-├── components/   # Reusable React components
-├── hooks/        # Custom React hooks
-├── lib/          # Helper functions and libraries
-├── new_frontend/ # Additional or alternative frontend assets
-├── server/       # FastAPI backend application
-├── .eslintrc.json# ESLint configuration for code quality
-├── .gitignore    # Git ignore file
-└── README.md     # You are here!
+├── ui/           # Next.js frontend (app/, components/, lib/, hooks/, config)
+├── api/          # FastAPI backend + resume/interview ML services
+├── assets/       # README screenshots
+├── CLAUDE.md     # Repo guide for AI coding agents
+├── README.md     # You are here!
+└── LICENSE
 ```
+
+> **Deploying:** on Vercel, set the project's **Root Directory to `ui`** (the
+> frontend lives there, not at the repo root). The `api/` backend deploys
+> separately (e.g. Render / Railway / Fly).
 ***
 
 ## ✍️ Authors

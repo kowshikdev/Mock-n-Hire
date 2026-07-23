@@ -5,7 +5,7 @@ import { motion } from "framer-motion"
 import { forwardRef, ReactNode } from "react"
 import { Loader2 } from "lucide-react"
 
-interface ModernButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
+interface ModernButtonProps extends Omit<React.ButtonHTMLAttributes<HTMLButtonElement>, 'onDrag' | 'onDragStart' | 'onDragEnd' | 'onAnimationStart' | 'onAnimationEnd'> {
   variant?: 'default' | 'primary' | 'secondary' | 'outline' | 'ghost' | 'destructive' | 'success' | 'warning'
   size?: 'sm' | 'md' | 'lg' | 'xl'
   loading?: boolean
