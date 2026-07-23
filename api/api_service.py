@@ -352,4 +352,7 @@ async def add_recruiter_note(
         raise HTTPException(status_code=500, detail="Failed to update notes or tags")
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # Railway (and most PaaS hosts) inject the port to bind via $PORT --
+    # hardcoding 8000 would silently fail to bind to the port Railway
+    # actually routes traffic to.
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
