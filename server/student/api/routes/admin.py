@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends
 from api.dependencies import get_supabase
+from api.auth import require_recruiter
 import logging
 from typing import List, Dict
 import uuid
@@ -10,7 +11,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 @router.get("/sessions")
-async def get_all_sessions(supabase=Depends(get_supabase)) -> List[Dict]:
+async def get_all_sessions(supabase=Depends(get_supabase), current_user: dict = Depends(require_recruiter)) -> List[Dict]:
     """
     Retrieve all mock interview sessions with details: question count, answer count, average stress.
     Uses a single query if admin_get_session_overview() exists, else falls back to N queries.
@@ -70,7 +71,7 @@ async def get_all_sessions(supabase=Depends(get_supabase)) -> List[Dict]:
 
 
 @router.delete("/session/{session_id}")
-async def delete_session(session_id: str, supabase=Depends(get_supabase)):
+async def delete_session(session_id: str, supabase=Depends(get_supabase), current_user: dict = Depends(require_recruiter)):
     """
     Delete a specific session and its related data (questions, answers, stress analysis, reports, files).
     """
