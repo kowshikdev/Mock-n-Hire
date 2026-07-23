@@ -17,7 +17,6 @@ from typing import Optional
 
 from process_resumes import process_all_resumes
 from rank_candidates import compute_relative_ranking
-from routes.comparison import router as comparison_router
 from routes.collaboration import router as collaboration_router
 from routes.search_analytics import router as search_router
 
@@ -41,7 +40,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(comparison_router)
+# NOTE: routes/comparison.py was a near-duplicate of routes/search_analytics.py
+# -- both mounted /compare-candidates, /history, /export, a real route
+# collision. comparison.py was removed; search_router keeps the better /export
+# (it sets a Content-Disposition download filename).
 app.include_router(collaboration_router)
 app.include_router(search_router)
 

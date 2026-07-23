@@ -1,37 +1,25 @@
-python==3.10.11
-# Core Dependencies
-openai
-langchain
+# Recruiter backend (resume screening + ranking) -- FastAPI app in api_service.py.
+# Requires Python 3.10+.
+#
+# Cleaned up from the original: removed `python==3.10.11` (not a pip package),
+# `langchain`/`faiss-cpu` (imported nowhere), `keras`/`tf-keras`/`tensorflow`
+# (only the never-loaded emotion model used those -- dropped), `jwt` (auth now
+# goes through supabase.auth, not manual JWT decode), the duplicate/wrong
+# `dotenv` package, `zipfile36` (stdlib zipfile is used), and unused
+# google-auth/tqdm/requests entries.
+
 fastapi
 uvicorn
-sentence-transformers
-faiss-cpu
-numpy==1.26.4
-pandas
-tqdm
-# concurrent.futures
-
-# File Handling
-pdfminer.six
-python-docx
-requests
-zipfile36
-
-# Machine Learning
-scikit-learn
-
-# Google Drive API (if needed)
-google-auth
-google-auth-oauthlib
-google-auth-httplib2
-google-api-python-client
-
-
-keras==2.11.0
-tf-keras
-tensorflow==2.11.0
+python-multipart          # Form() / UploadFile in the upload endpoints
 python-dotenv
-python-multipart
-jwt
 supabase
-dotenv
+
+openai                    # pointed at Groq's OpenAI-compatible endpoint (see process_resumes.py)
+pydantic
+
+pandas
+scikit-learn              # MinMaxScaler in rank_candidates.py
+sentence-transformers     # loaded in process_resumes.py (embedding-based ranking is Phase 1 / #9)
+
+pdfminer.six              # PDF resume text extraction
+python-docx               # DOCX resume text extraction
