@@ -17,6 +17,12 @@ load_dotenv()
 GROQ_API_KEY = os.getenv("LLM_API_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+# Was hardcoded as "mistral-saba-24b". Same LLM_MODEL var as the student
+# side's groq_service.py/report_service.py -- Groq decommissioning
+# llama3-8b-8192 outright (not just deprecating it) is what forced this
+# whole change; one shared, configurable model name means the next
+# retirement is an env var update, not a deploy.
+LLM_MODEL = os.getenv("LLM_MODEL", "llama-3.1-8b-instant")
 
 client = openai.OpenAI(api_key=GROQ_API_KEY, base_url="https://api.groq.com/openai/v1")
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -103,7 +109,7 @@ def extract_candidate_name(resume_text):
 
     try:
         response = client.chat.completions.create(
-            model="mistral-saba-24b",
+            model=LLM_MODEL,
             messages=[
                 {"role": "user", "content": prompt}
             ]
@@ -138,7 +144,7 @@ Return your response in JSON only:
     for attempt in range(5):
         try:
             resp = client.chat.completions.create(
-                model="mistral-saba-24b",
+                model=LLM_MODEL,
                 messages=[
                     {"role": "system", "content": "Return only JSON."},
                     {"role": "user", "content": prompt}

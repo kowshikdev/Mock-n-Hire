@@ -12,8 +12,9 @@ actually true" section below before trusting any feature description.
 
 Monorepo: Next.js/TypeScript/Tailwind frontend (`ui/`) + FastAPI backend
 (`api/`) + Supabase (Postgres, storage, auth). LLM calls go to Groq's
-OpenAI-compatible endpoint (`llama3-8b-8192`, `mistral-saba-24b`) + Whisper
-for transcription.
+OpenAI-compatible endpoint, model set by `LLM_MODEL` (default
+`llama-3.1-8b-instant` — see "Fixed already" for why this isn't hardcoded
+anymore) + Whisper for transcription.
 
 ## Design system
 
@@ -123,6 +124,14 @@ That's the whole set — it was 61 files before, 45 of them unreachable.
   a *previous* Supabase project's URL, 0-10 scores rendered on 0-100 bars,
   and the `COMPLETE`/`complete` case mismatch that stopped the screening
   redirect from ever firing.
+- **Chat model was hardcoded per-file** (`llama3-8b-8192` in
+  `groq_service.py`/`report_service.py`, `mistral-saba-24b` in
+  `process_resumes.py`). Groq decommissioned `llama3-8b-8192` outright,
+  breaking every question-generation, answer-evaluation, and session-summary
+  call with a `model_decommissioned` 400. Both now read one shared
+  `LLM_MODEL` env var (default `llama-3.1-8b-instant`) — the next
+  deprecation is an env var change, not a deploy. Check current IDs at
+  https://console.groq.com/docs/models before changing it.
 - **Auth session store mismatch:** `lib/supabase.ts` used the plain
   `createClient` (localStorage session), while `middleware.ts` reads the
   session from cookies via `createMiddlewareClient`. The two never saw each

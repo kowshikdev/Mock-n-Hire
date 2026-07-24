@@ -45,7 +45,7 @@ Ensure each question starts with a number, followed by a period and a space (e.g
                 {"role": "system", "content": "You are a helpful AI assistant that generates interview questions based on resumes."},
                 {"role": "user", "content": prompt}
             ],
-            model="llama3-8b-8192",
+            model=settings.LLM_MODEL,
             max_tokens=500
         )
         response_text = completion.choices[0].message.content
@@ -103,7 +103,7 @@ Feedback: [your feedback]
                     {"role": "system", "content": "You are a helpful AI assistant that evaluates interview answers."},
                     {"role": "user", "content": prompt}
                 ],
-                model="llama3-8b-8192",
+                model=settings.LLM_MODEL,
                 max_tokens=150
             )
             response_text = completion.choices[0].message.content.strip()
