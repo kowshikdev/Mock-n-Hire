@@ -1,4 +1,4 @@
-from models.schemas import QuestionReport, FinalReportResponse, UserSummaryResponse, SessionStats
+from student.models.schemas import QuestionReport, FinalReportResponse, UserSummaryResponse, SessionStats
 from typing import List, Dict
 from datetime import datetime
 import logging

@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends
-from api.dependencies import get_supabase, get_whisper_service
-from api.auth import require_session_owner
+from student.api.dependencies import get_supabase, get_whisper_service
+from student.api.auth import require_session_owner
 import logging
 import os
 import uuid
@@ -8,7 +8,7 @@ import asyncio
 import tempfile
 import cv2
 
-from utils.supabase_utils import download_file
+from student.utils.supabase_utils import download_file
 
 logging.basicConfig(
     level=logging.INFO,

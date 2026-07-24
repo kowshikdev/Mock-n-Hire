@@ -1,5 +1,5 @@
 from groq import Groq
-from config.settings import settings
+from student.config.settings import settings
 import os
 
 class GroqWhisperService:

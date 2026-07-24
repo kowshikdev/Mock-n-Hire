@@ -1,6 +1,6 @@
 from fastapi import Header, HTTPException, Depends
 
-from utils.supabase_utils import supabase
+from student.utils.supabase_utils import supabase
 
 # Was: no auth dependency existed on any interview/stress/admin route in this
 # backend at all -- mock_user_id/session_id path params were only checked

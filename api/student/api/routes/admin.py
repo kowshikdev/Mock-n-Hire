@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends
-from api.dependencies import get_supabase
-from api.auth import require_recruiter
+from student.api.dependencies import get_supabase
+from student.api.auth import require_recruiter
 import logging
 from typing import List, Dict
 import uuid
