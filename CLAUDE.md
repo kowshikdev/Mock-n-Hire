@@ -15,6 +15,36 @@ Monorepo: Next.js/TypeScript/Tailwind frontend (`ui/`) + FastAPI backend
 OpenAI-compatible endpoint (`llama3-8b-8192`, `mistral-saba-24b`) + Whisper
 for transcription.
 
+## Design system
+
+`DESIGN.md` at the repo root is the single source of truth for the UI:
+an editorial off-white canvas (`#f5f5f5`) with warm near-black ink, display
+type at weight 300, Inter for body, and soft pastel gradient orbs as the
+only colour moment.
+
+Non-negotiables, all encoded in `ui/tailwind.config.ts`:
+
+- **There is no dark mode.** One fixed canvas — no `darkMode`, no theme
+  provider, no toggle. Don't reintroduce `dark:` variants.
+- **The ink pill is the only CTA colour.** No saturated brand action colour.
+- **Display type never goes above weight 300.** Bolding it changes the brand
+  voice from editorial to consumer-marketing.
+- **Gradient orbs are decoration only** — never a button fill, text colour,
+  or content container. `<Orb>` is always `pointer-events-none` +
+  `aria-hidden`.
+- Display face is **Cormorant Garamond 300**. Waldenburg is licensed;
+  of DESIGN.md's named substitutes only a Garamond at 300 keeps the weight
+  the system is built around (EB Garamond's lightest is 400).
+
+`SECTION_DESIGN.md` describes a *different* brand ("Kresna": DM Sans +
+Caveat, saturated blue). Only its footer **composition** is used — the skin
+is DESIGN.md's. Its background `<video>` src points at a CloudFront asset on
+someone else's account and is deliberately not shipped.
+
+Primitives live in `ui/components/ui/`: `button`, `card`, `input`, `badge`,
+`orb`, `section`, `states` (Loading/Empty/Error/Stat/Meter), `sonner`.
+That's the whole set — it was 61 files before, 45 of them unreachable.
+
 ## Layout (monorepo)
 
 - `ui/` — Next.js frontend. **Vercel Root Directory must be set to `ui`**,
@@ -82,9 +112,31 @@ for transcription.
   reads `NEXT_PUBLIC_API_URL` (falls back to `localhost:4000` for local dev
   only). **Must be set in Vercel** to the Railway backend's public URL.
 
+- **UI revamp:** every surface rebuilt on the DESIGN.md system. Alongside the
+  restyle this removed fabricated marketing content (invented testimonials
+  and usage statistics), a `session-history` page built entirely on six
+  hardcoded fake sessions, and a Settings page whose save button toasted
+  success while persisting nothing. Both now read/write real Supabase data.
+  Also fixed: an `AuthProvider` redirect that bounced anonymous visitors off
+  the public landing page, a student dashboard calling the recruiter-only
+  `/admin/sessions` route (403 for every student), a results page hardcoding
+  a *previous* Supabase project's URL, 0-10 scores rendered on 0-100 bars,
+  and the `COMPLETE`/`complete` case mismatch that stopped the screening
+  redirect from ever firing.
+
 ## Known issues still open
 
 - No tests, no CI (issue #8).
+- **The candidate's target role is still discarded** (issue #9). The role
+  input was removed from the student dashboard rather than left in place:
+  it was collected and never sent anywhere, so it changed nothing. Restore
+  it when `generate-questions` accepts a role.
+- **`weight_certifications` is still not wired** (issue #9). The third
+  weight slider was removed from the new-screening modal for the same
+  reason — the FastAPI endpoint never declared the field, so the value was
+  silently dropped by request parsing and the ranking ignored it. The
+  certifications a resume lists are shown as evidence, but are explicitly
+  labelled as not part of the score.
 - Pre-existing route collision (not introduced by the merge): `api_service.py`'s
   own `@app.get("/export")` is unreachable — `routes/search_analytics.py`'s
   `/export` is registered first via `include_router` and wins. Not fixed here;

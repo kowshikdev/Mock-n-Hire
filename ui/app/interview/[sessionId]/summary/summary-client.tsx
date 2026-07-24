@@ -1,452 +1,340 @@
 "use client"
 
-import { useEffect, useState, useRef } from "react"
-import { useRouter } from "next/navigation"
-import { createClient } from "@supabase/supabase-js"
-import { GlassButton } from "@/components/ui/glass-button"
-import { GlassCard } from "@/components/ui/glass-card"
-import { Progress } from "@/components/ui/progress"
-import { motion } from "framer-motion"
-import {
-  ArrowLeft, Download, TrendingUp, TrendingDown, Minus, Brain,
-  Clock, Star, FileText, Loader2
-} from "lucide-react"
-import { toast } from "sonner"
+import { useCallback, useEffect, useRef, useState } from "react"
+import Link from "next/link"
+import { ArrowLeft, RotateCcw } from "lucide-react"
 
-// Setup Supabase client
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-const supabase = createClient(supabaseUrl, supabaseAnonKey)
+import { supabase } from "@/lib/supabase"
+import { Button } from "@/components/ui/button"
+import { Card, CardTitle } from "@/components/ui/card"
+import { Badge } from "@/components/ui/badge"
+import { Container } from "@/components/ui/section"
+import { ErrorState, LoadingState, Meter, Stat } from "@/components/ui/states"
 
-export default function SummaryPageClient({ sessionId }: { sessionId: string }) {
-  const router = useRouter()
-  const [loading, setLoading] = useState(true)
-  const [polling, setPolling] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  const [report, setReport] = useState<any>(null)
-  const [pollCount, setPollCount] = useState(0)
-  const intervalRef = useRef<NodeJS.Timeout | null>(null)
+/**
+ * Interview summary.
+ *
+ * Two fixes beyond the restyle:
+ *
+ *  - This module used to call createClient() itself, creating a SECOND
+ *    GoTrue client alongside lib/supabase's singleton. Two clients on one
+ *    page race each other for the same refresh token and supabase-js warns
+ *    about exactly this. It now uses the shared client.
+ *
+ *  - The report row is written asynchronously by the backend after the last
+ *    answer, so it may genuinely not exist for a few seconds. The polling
+ *    that handles this is kept, but bounded and with an honest message
+ *    instead of an indefinite spinner.
+ *
+ * Presentation note: the per-question "stress" figure the backend stores is
+ * a words-per-minute heuristic off the transcript -- there is no emotion
+ * model behind it (see CLAUDE.md). It is therefore surfaced here as
+ * *speaking pace*, private to the candidate, and never as an emotional or
+ * hireability signal.
+ */
 
-  // Poll for report every 5s until found, then load rest of data
-  useEffect(() => {
-    async function pollForReport() {
-      setPollCount(cnt => cnt + 1)
-      console.info(`[Polling] Attempt #${pollCount + 1} — Checking for report row...`)
-      try {
-        const { data: reportRow, error: reportErr } = await supabase
-          .from("mock_interview_reports")
-          .select("*")
-          .eq("session_id", sessionId)
-          .single()
-        if (reportRow && !reportErr) {
-          console.info("[Polling] Report found! Loading details...")
-          await fetchAll(reportRow)
-          setPolling(false)
-          setLoading(false)
-          if (intervalRef.current) clearInterval(intervalRef.current)
-        } else {
-          if (
-            reportErr &&
-            reportErr.message &&
-            !reportErr.message.includes("JSON object requested, multiple (or no) rows returned")
-          ) {
-            setError("Something went wrong: " + reportErr.message)
-            setLoading(false)
-            setPolling(false)
-            if (intervalRef.current) clearInterval(intervalRef.current)
-            setTimeout(() => router.push("/dashboard/student"), 5000)
-            return
-          }
-          // Not ready, will poll again in 5 seconds
-          console.info("[Polling] Report not ready yet, retrying in 5 seconds...")
-        }
-      } catch (err: any) {
-        setError("Something went wrong: " + err.message)
-        setLoading(false)
-        setPolling(false)
-        if (intervalRef.current) clearInterval(intervalRef.current)
-        setTimeout(() => router.push("/dashboard/student"), 5000)
-      }
-    }
+const SCORE_MAX = 10
+const MAX_POLLS = 10
+const POLL_MS = 3000
 
-    pollForReport() // initial immediate call
+type QuestionReport = {
+  number: number
+  question: string
+  category: string | null
+  score: number | null
+  feedback: string
+  paceScore: number | null
+  answer: string
+}
 
-    intervalRef.current = setInterval(pollForReport, 5000)
+type Report = {
+  overallScore: number | null
+  summary: string | null
+  recommendation: string | null
+  duration: string
+  questions: QuestionReport[]
+}
 
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current)
-    }
-    // eslint-disable-next-line
-  }, [sessionId])
+function paceLabel(score: number | null): string {
+  if (score == null) return "Not measured"
+  // The heuristic centres on a comfortable range; both extremes read as
+  // rushed or halting delivery.
+  if (score > 60) return "Rushed or uneven"
+  if (score > 30) return "Slightly uneven"
+  return "Steady"
+}
 
-  // Fetch all detail data after report is ready
-  async function fetchAll(reportRow: any) {
-    try {
-      // 1. Get questions
-      const { data: questions, error: questionsErr } = await supabase
-        .from("mock_interview_questions")
-        .select("*")
-        .eq("session_id", sessionId)
-        .order("question_number", { ascending: true })
-      if (questionsErr) throw new Error("Could not load questions")
+export default function SummaryClient({ sessionId }: { sessionId: string }) {
+  const [report, setReport] = useState<Report | null>(null)
+  const [state, setState] = useState<"loading" | "ready" | "pending" | "error">("loading")
+  const pollCount = useRef(0)
 
-      // 2. Get answers
-      const { data: answers, error: answersErr } = await supabase
-        .from("mock_interview_answers")
-        .select("*")
-        .eq("session_id", sessionId)
-      if (answersErr) throw new Error("Could not load answers")
+  const assemble = useCallback(
+    async (reportRow: Record<string, unknown>) => {
+      const [{ data: questions }, { data: answers }, { data: pace }, { data: session }] =
+        await Promise.all([
+          supabase
+            .from("mock_interview_questions")
+            .select("question_number,question_text,category")
+            .eq("session_id", sessionId)
+            .order("question_number", { ascending: true }),
+          supabase
+            .from("mock_interview_answers")
+            .select("question_number,answer_text,feedback,score")
+            .eq("session_id", sessionId),
+          supabase
+            .from("mock_interview_stress_analysis")
+            .select("question_number,stress_score")
+            .eq("session_id", sessionId),
+          supabase
+            .from("mock_interview_sessions")
+            .select("start_time,end_time")
+            .eq("id", sessionId)
+            .maybeSingle(),
+        ])
 
-      // 3. Get stress per question
-      const { data: stressData, error: stressErr } = await supabase
-        .from("mock_interview_stress_analysis")
-        .select("*")
-        .eq("session_id", sessionId)
-      if (stressErr) throw new Error("Could not load stress analysis")
+      const answerMap = new Map((answers ?? []).map((a) => [a.question_number, a]))
+      const paceMap = new Map((pace ?? []).map((p) => [p.question_number, p]))
 
-      // 4. Get session info for duration (optional: calculate duration)
-      const { data: sessionInfo, error: sessionErr } = await supabase
-        .from("mock_interview_sessions")
-        .select("*")
-        .eq("id", sessionId)
-        .single()
-      if (sessionErr || !sessionInfo) throw new Error("Could not load session info")
-
-      // Merge all data by question_number
-      const questionsMerged = questions.map((q: any) => {
-        const ans = answers.find((a: any) => a.question_number === q.question_number) || {}
-        const stress = stressData.find((s: any) => s.question_number === q.question_number) || {}
-        let strengths: string[] = []
-        let improvements: string[] = []
-        // Optionally, extract from feedback
+      const merged: QuestionReport[] = (questions ?? []).map((q) => {
+        const a = answerMap.get(q.question_number)
+        const p = paceMap.get(q.question_number)
         return {
-          id: q.question_number,
+          number: q.question_number,
           question: q.question_text,
-          category: q.category,
-          stressScore: typeof stress.stress_score === "number" ? Math.round(stress.stress_score) : 0,
-          feedback: ans.feedback || "No feedback available.",
-          strengths,
-          improvements,
-          answer: ans.answer_text || "",
-          audioUrl: ans.audio_url || ""
+          category: q.category ?? null,
+          score: typeof a?.score === "number" ? a.score : null,
+          feedback: a?.feedback || "No feedback recorded for this answer.",
+          paceScore: typeof p?.stress_score === "number" ? p.stress_score : null,
+          answer: a?.answer_text || "",
         }
       })
 
-      // Duration calculation
       let duration = "—"
-      if (sessionInfo.start_time && sessionInfo.end_time) {
-        const start = new Date(sessionInfo.start_time)
-        const end = new Date(sessionInfo.end_time)
-        const diff = Math.max(0, (end.getTime() - start.getTime()) / 1000)
-        const min = Math.floor(diff / 60)
-        const sec = Math.floor(diff % 60)
-        duration = `${min}:${sec.toString().padStart(2, "0")}`
+      if (session?.start_time && session?.end_time) {
+        const diff = Math.max(
+          0,
+          (new Date(session.end_time).getTime() - new Date(session.start_time).getTime()) / 1000
+        )
+        duration = `${Math.floor(diff / 60)}:${Math.floor(diff % 60)
+          .toString()
+          .padStart(2, "0")}`
       }
 
       setReport({
-        overallScore: Math.round(reportRow.final_score ?? 0),
-        averageStress: questionsMerged.length
-          ? Math.round(questionsMerged.reduce((sum, q) => sum + (q.stressScore ?? 0), 0) / questionsMerged.length)
-          : 0,
+        overallScore:
+          typeof reportRow.final_score === "number" ? reportRow.final_score : null,
+        summary: (reportRow.overall_summary as string) ?? null,
+        recommendation: (reportRow.recommendation as string) ?? null,
         duration,
-        questions: questionsMerged,
-        overallSummary: reportRow.overall_summary,
-        recommendation: reportRow.recommendation
+        questions: merged,
       })
-      setLoading(false)
-    } catch (err: any) {
-      setError("Something went wrong: " + err.message)
-      setLoading(false)
-      setTimeout(() => router.push("/dashboard/student"), 5000)
+      setState("ready")
+    },
+    [sessionId]
+  )
+
+  useEffect(() => {
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout>
+
+    const attempt = async () => {
+      try {
+        const { data: reportRow, error } = await supabase
+          .from("mock_interview_reports")
+          .select("*")
+          .eq("session_id", sessionId)
+          .maybeSingle()
+
+        if (cancelled) return
+        if (error) throw error
+
+        if (reportRow) {
+          await assemble(reportRow as Record<string, unknown>)
+          return
+        }
+
+        pollCount.current += 1
+        if (pollCount.current >= MAX_POLLS) {
+          setState("pending")
+          return
+        }
+        setState("loading")
+        timer = setTimeout(attempt, POLL_MS)
+      } catch (err) {
+        if (cancelled) return
+        console.error("Failed to load report:", err)
+        setState("error")
+      }
     }
-  }
 
-  // Color/indicator helpers
-  const getStressColor = (score: number) => {
-    if (score <= 30) return "text-green-400"
-    if (score <= 50) return "text-yellow-400"
-    return "text-red-400"
-  }
-  const getStressIcon = (score: number) => {
-    if (score <= 30) return <TrendingDown className="w-4 h-4" />
-    if (score <= 50) return <Minus className="w-4 h-4" />
-    return <TrendingUp className="w-4 h-4" />
-  }
-  const getOverallScoreColor = (score: number) => {
-    if (score >= 80) return "text-green-400"
-    if (score >= 70) return "text-yellow-400"
-    if (score >= 60) return "text-orange-400"
-    return "text-red-400"
-  }
+    void attempt()
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [sessionId, assemble])
 
-  const downloadReport = () => {
-    toast.success("Report downloaded successfully!") // (Optionally implement real download)
-  }
-
-  if (loading || polling || !report)
+  if (state === "loading") {
     return (
-      <div className="flex flex-col justify-center items-center min-h-[60vh]">
-        <motion.div
-          animate={{ rotate: 360 }}
-          transition={{ repeat: Infinity, duration: 1, ease: "linear" }}
-          className="mb-6"
-        >
-          <Loader2 className="w-14 h-14 animate-spin text-blue-400" />
-        </motion.div>
-        <div className="text-lg text-blue-200 mb-1 font-semibold">
-          Generating your AI-powered report...
-        </div>
-        <div className="text-white/70 text-sm">
-          This may take a few moments. Please wait while we analyze your performance.
-        </div>
-        <div className="text-blue-400 mt-2 text-xs opacity-60">
-          (Polling for report, attempt #{pollCount + 1})
-        </div>
+      <div className="section-band">
+        <Container>
+          <LoadingState message="Scoring your answers…" />
+        </Container>
       </div>
     )
+  }
 
-  if (error)
+  if (state === "pending") {
     return (
-      <div className="flex flex-col items-center justify-center min-h-[60vh] text-center space-y-4">
-        <span className="text-red-400 text-xl font-bold">{error}</span>
-        <span className="text-white/60">Returning to dashboard in 5 seconds...</span>
+      <div className="section-band">
+        <Container>
+          <ErrorState
+            title="Your report is still being written"
+            description="Scoring runs in the background after the last answer and is taking longer than usual. It'll be here shortly."
+            action={
+              <Button variant="outline" onClick={() => window.location.reload()}>
+                <RotateCcw />
+                Check again
+              </Button>
+            }
+          />
+        </Container>
       </div>
     )
+  }
+
+  if (state === "error" || !report) {
+    return (
+      <div className="section-band">
+        <Container>
+          <ErrorState
+            title="Couldn't load this report"
+            description="There was a problem reaching the database."
+            action={
+              <Button variant="outline" asChild>
+                <Link href="/dashboard/student">Back to dashboard</Link>
+              </Button>
+            }
+          />
+        </Container>
+      </div>
+    )
+  }
+
+  const answered = report.questions.filter((q) => q.score != null).length
 
   return (
-    <div className="container mx-auto px-4 py-8 space-y-8">
-      {/* Header */}
-      <motion.div
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        className="flex items-center justify-between"
-      >
-        <div className="flex items-center space-x-4">
-          <GlassButton
-            onClick={() => router.push("/dashboard/student")}
-            className="flex items-center space-x-2"
+    <div className="section-band">
+      <Container className="flex flex-col gap-xl">
+        <div className="flex flex-col gap-base">
+          <Link
+            href="/dashboard/student"
+            className="inline-flex w-fit items-center gap-xs text-caption text-muted transition-colors hover:text-ink"
           >
-            <ArrowLeft className="w-4 h-4" />
-            <span>Back to Dashboard</span>
-          </GlassButton>
-          <div>
-            <h1 className="text-3xl font-bold text-white">Interview Summary</h1>
-            <p className="text-white/60">AI-powered analysis of your performance</p>
+            <ArrowLeft className="size-4" />
+            Dashboard
+          </Link>
+          <div className="flex flex-col gap-xxs">
+            <span className="eyebrow">Session report</span>
+            <h1 className="font-display text-display-md text-ink md:text-display-lg">
+              How that interview went
+            </h1>
           </div>
         </div>
-        <GlassButton
-          onClick={downloadReport}
-          variant="primary"
-          className="flex items-center space-x-2"
-        >
-          <Download className="w-4 h-4" />
-          <span>Download Report</span>
-        </GlassButton>
-      </motion.div>
 
-      {/* Overview Cards */}
-      <motion.div
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.1 }}
-        className="grid grid-cols-1 md:grid-cols-4 gap-6"
-      >
-        <GlassCard className="p-6 text-center" hover={false}>
-          <div className="space-y-2">
-            <div className={`text-3xl font-bold ${getOverallScoreColor(report.overallScore)}`}>
-              {report.overallScore}%
-            </div>
-            <p className="text-white/60">Overall Score</p>
-            <div className="flex items-center justify-center">
-              <Star className="w-4 h-4 text-yellow-400" />
-            </div>
-          </div>
-        </GlassCard>
-        <GlassCard className="p-6 text-center" hover={false}>
-          <div className="space-y-2">
-            <div className={`text-3xl font-bold ${getStressColor(report.averageStress)}`}>
-              {report.averageStress}%
-            </div>
-            <p className="text-white/60">Avg Stress Level</p>
-            <div className="flex items-center justify-center">{getStressIcon(report.averageStress)}</div>
-          </div>
-        </GlassCard>
-        <GlassCard className="p-6 text-center" hover={false}>
-          <div className="space-y-2">
-            <div className="text-3xl font-bold text-blue-400">{report.duration}</div>
-            <p className="text-white/60">Duration</p>
-            <div className="flex items-center justify-center">
-              <Clock className="w-4 h-4 text-blue-400" />
-            </div>
-          </div>
-        </GlassCard>
-        <GlassCard className="p-6 text-center" hover={false}>
-          <div className="space-y-2">
-            <div className="text-3xl font-bold text-purple-400">{report.questions.length}</div>
-            <p className="text-white/60">Questions</p>
-            <div className="flex items-center justify-center">
-              <FileText className="w-4 h-4 text-purple-400" />
-            </div>
-          </div>
-        </GlassCard>
-      </motion.div>
+        {/* Headline numbers */}
+        <Card variant="panel" className="grid gap-lg sm:grid-cols-3">
+          <Stat
+            value={
+              report.overallScore != null ? report.overallScore.toFixed(1) : "—"
+            }
+            label="Overall score"
+            hint={`out of ${SCORE_MAX}`}
+          />
+          <Stat
+            value={`${answered}/${report.questions.length}`}
+            label="Answered"
+            hint="Questions scored"
+          />
+          <Stat value={report.duration} label="Duration" hint="Start to finish" />
+        </Card>
 
-      {/* AI Summary/Recommendation */}
-      <motion.div
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.15 }}
-      >
-        <GlassCard className="p-6 space-y-4">
-          <h2 className="text-xl font-semibold text-white mb-2">AI Summary & Recommendation</h2>
-          <p className="text-white/90">{report.overallSummary}</p>
-          <p className="text-yellow-400">{report.recommendation}</p>
-        </GlassCard>
-      </motion.div>
+        {report.summary && (
+          <Card variant="panel" className="flex flex-col gap-sm">
+            <CardTitle>Summary</CardTitle>
+            <p className="text-body-md text-body">{report.summary}</p>
+            {report.recommendation && (
+              <>
+                <CardTitle className="mt-sm text-title-sm">What to work on</CardTitle>
+                <p className="text-body-md text-body">{report.recommendation}</p>
+              </>
+            )}
+          </Card>
+        )}
 
-      {/* Stress Analysis Chart */}
-      <motion.div
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.2 }}
-      >
-        <GlassCard className="p-6 space-y-6">
-          <div className="flex items-center space-x-3">
-            <div className="p-2 rounded-lg bg-blue-500/20">
-              <Brain className="w-5 h-5 text-blue-400" />
-            </div>
-            <h2 className="text-xl font-semibold text-white">Stress Analysis</h2>
-          </div>
-          <div className="space-y-4">
-            {report.questions.map((question: any, index: number) => (
-              <motion.div
-                key={question.id}
-                initial={{ opacity: 0, x: -20 }}
-                animate={{ opacity: 1, x: 0 }}
-                transition={{ delay: 0.3 + index * 0.07 }}
-                className="space-y-3"
-              >
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center space-x-3">
-                    <span className="w-8 h-8 rounded-full bg-blue-500/20 flex items-center justify-center text-blue-400 font-medium text-sm">
-                      Q{question.id}
-                    </span>
-                    <div>
-                      <p className="font-medium text-white">{question.category}</p>
-                      <p className="text-sm text-white/60 max-w-md truncate">{question.question}</p>
-                    </div>
-                  </div>
-                  <div className="flex items-center space-x-2">
-                    {getStressIcon(question.stressScore)}
-                    <span className={`font-medium ${getStressColor(question.stressScore)}`}>
-                      {question.stressScore}%
-                    </span>
-                  </div>
+        {/* Per question */}
+        <div className="flex flex-col gap-base">
+          <h2 className="font-display text-display-sm text-ink">Question by question</h2>
+          {report.questions.map((q) => (
+            <Card key={q.number} variant="panel" className="flex flex-col gap-base">
+              <div className="flex flex-wrap items-start justify-between gap-sm">
+                <div className="flex flex-col gap-xxs">
+                  <span className="eyebrow">Question {q.number}</span>
+                  <CardTitle>{q.question}</CardTitle>
                 </div>
-                <Progress value={question.stressScore} className="h-2" />
-              </motion.div>
-            ))}
-          </div>
-        </GlassCard>
-      </motion.div>
+                {q.category && <Badge variant="outline">{q.category}</Badge>}
+              </div>
 
-      {/* Detailed Feedback */}
-      <motion.div
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.4 }}
-        className="space-y-6"
-      >
-        <h2 className="text-xl font-semibold text-white">Detailed Feedback</h2>
-        <div className="grid gap-6">
-          {report.questions.map((question: any, index: number) => (
-            <motion.div
-              key={question.id}
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.5 + index * 0.07 }}
-            >
-              <GlassCard className="p-6 space-y-4">
-                <div className="flex items-start justify-between">
-                  <div className="space-y-2">
-                    <div className="flex items-center space-x-2">
-                      <span className="px-2 py-1 rounded bg-blue-500/20 text-blue-300 text-xs font-medium">
-                        {question.category}
-                      </span>
-                      <span className={`px-2 py-1 rounded text-xs font-medium ${getStressColor(question.stressScore)} bg-current/10`}>
-                        Stress: {question.stressScore}%
-                      </span>
-                    </div>
-                    <h3 className="font-semibold text-white">{question.question}</h3>
-                  </div>
-                </div>
-                <div className="space-y-4">
-                  <div>
-                    <h4 className="font-medium text-white mb-2">AI Feedback</h4>
-                    <p className="text-white/80 text-sm leading-relaxed">{question.feedback}</p>
-                  </div>
-                  <div className="grid md:grid-cols-2 gap-4">
-                    <div>
-                      <h4 className="font-medium text-green-400 mb-2">Strengths</h4>
-                      <ul className="space-y-1">
-                        {question.strengths.length === 0 ? (
-                          <li className="text-sm text-white/40">No strengths detected.</li>
-                        ) : (
-                          question.strengths.map((strength: string, idx: number) => (
-                            <li key={idx} className="text-sm text-white/70 flex items-center space-x-2">
-                              <div className="w-1.5 h-1.5 rounded-full bg-green-400"></div>
-                              <span>{strength}</span>
-                            </li>
-                          ))
-                        )}
-                      </ul>
-                    </div>
-                    <div>
-                      <h4 className="font-medium text-yellow-400 mb-2">Areas for Improvement</h4>
-                      <ul className="space-y-1">
-                        {question.improvements.length === 0 ? (
-                          <li className="text-sm text-white/40">No suggestions found.</li>
-                        ) : (
-                          question.improvements.map((improvement: string, idx: number) => (
-                            <li key={idx} className="text-sm text-white/70 flex items-center space-x-2">
-                              <div className="w-1.5 h-1.5 rounded-full bg-yellow-400"></div>
-                              <span>{improvement}</span>
-                            </li>
-                          ))
-                        )}
-                      </ul>
-                    </div>
-                  </div>
-                </div>
-              </GlassCard>
-            </motion.div>
+              {q.score != null && (
+                <Meter
+                  label="Answer score"
+                  value={q.score}
+                  max={SCORE_MAX}
+                  valueLabel={`${q.score}/${SCORE_MAX}`}
+                />
+              )}
+
+              <div className="flex flex-col gap-xs">
+                <span className="text-body-strong text-ink">Feedback</span>
+                <p className="text-body-md text-body">{q.feedback}</p>
+              </div>
+
+              {q.answer && (
+                <details className="group">
+                  <summary className="cursor-pointer text-caption text-muted transition-colors hover:text-ink">
+                    Show your transcribed answer
+                  </summary>
+                  <p className="mt-sm rounded-lg bg-canvas-soft p-base text-body-sm text-body">
+                    {q.answer}
+                  </p>
+                </details>
+              )}
+
+              <div className="flex items-center justify-between gap-sm border-t border-hairline pt-sm">
+                <span className="text-caption text-muted">
+                  Speaking pace &middot; {paceLabel(q.paceScore)}
+                </span>
+              </div>
+            </Card>
           ))}
         </div>
-      </motion.div>
 
-      {/* Action Buttons */}
-      <motion.div
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.6 }}
-        className="flex justify-center space-x-4"
-      >
-        <GlassButton
-          onClick={() => router.push("/dashboard/student")}
-          className="flex items-center space-x-2"
-        >
-          <Brain className="w-4 h-4" />
-          <span>Take Another Interview</span>
-        </GlassButton>
-        <GlassButton
-          onClick={() => router.push("/session-history")}
-          variant="primary"
-          className="flex items-center space-x-2"
-        >
-          <FileText className="w-4 h-4" />
-          <span>View All Sessions</span>
-        </GlassButton>
-      </motion.div>
+        <p className="text-caption text-muted">
+          Speaking pace is measured from your transcript&rsquo;s words per minute. It is a
+          delivery cue for your own practice only &mdash; it is not an emotion or
+          confidence measurement, and it is never shown to recruiters.
+        </p>
+
+        <div className="flex flex-wrap gap-sm">
+          <Button asChild>
+            <Link href="/dashboard/student">Practise again</Link>
+          </Button>
+          <Button variant="outline" asChild>
+            <Link href="/session-history">All sessions</Link>
+          </Button>
+        </div>
+      </Container>
     </div>
   )
 }

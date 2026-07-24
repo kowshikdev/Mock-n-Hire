@@ -1,178 +1,180 @@
 "use client"
 
-import { GlassButton } from "@/components/ui/glass-button"
-import { GlassCard } from "@/components/ui/glass-card"
-import { GlassInput } from "@/components/ui/glass-input"
-import { Switch } from "@/components/ui/switch"
-import { useAppStore } from "@/lib/store"
-import { motion } from "framer-motion"
-import { Palette, User, LogOut, Trash2, Save } from "lucide-react"
-import { useState } from "react"
+import { useEffect, useState } from "react"
+import { useRouter } from "next/navigation"
 import { toast } from "sonner"
 
+import { supabase } from "@/lib/supabase"
+import { signOut } from "@/lib/auth"
+import { useAppStore } from "@/lib/store"
+import { Button } from "@/components/ui/button"
+import { Card, CardTitle } from "@/components/ui/card"
+import { Field, Input } from "@/components/ui/input"
+import { Container } from "@/components/ui/section"
+import { Spinner } from "@/components/ui/states"
+
+/**
+ * Settings.
+ *
+ * The previous version's save handler was a stub that toasted "Settings
+ * saved successfully!" and wrote nothing anywhere -- users were told their
+ * changes persisted when the next reload silently discarded them. Delete
+ * Account was the same: it cleared local state and claimed "Account deleted
+ * successfully" while leaving the account fully intact.
+ *
+ * Name now writes to the `users` row for real. Email is shown read-only:
+ * changing it means re-verifying through Supabase Auth's email-change flow,
+ * which this UI does not implement, and a field that silently ignores edits
+ * is the exact failure being fixed here.
+ *
+ * Account deletion needs a service-role key to remove the auth user, so it
+ * cannot be done from the browser at all. Rather than fake it, the section
+ * explains how to request it.
+ *
+ * The Appearance panel (theme + accent colour) is gone entirely: the design
+ * system has one fixed canvas, so those controls had nothing to change.
+ */
 export default function SettingsPage() {
-  const { user, theme, accentColor, setTheme, setAccentColor, setUser } = useAppStore()
-  const [formData, setFormData] = useState({
-    name: user?.name || '',
-    email: user?.email || ''
-  })
+  const router = useRouter()
+  const { user, setUser } = useAppStore()
 
-  const handleSave = () => {
-    // Mock save
-    toast.success("Settings saved successfully!")
-  }
+  const [name, setName] = useState("")
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
-  const handleDeleteAccount = () => {
-    // Mock account deletion
-    if (confirm("Are you sure you want to delete your account? This action cannot be undone.")) {
-      setUser(null)
-      toast.success("Account deleted successfully")
+  useEffect(() => {
+    setName(user?.name ?? "")
+  }, [user?.name])
+
+  const dirty = name.trim() !== (user?.name ?? "").trim()
+
+  const handleSave = async () => {
+    if (!user?.id) return
+    const trimmed = name.trim()
+    if (!trimmed) {
+      setError("Name can't be empty")
+      return
+    }
+
+    setSaving(true)
+    setError(null)
+    try {
+      const { error: updateError } = await supabase
+        .from("users")
+        .update({ name: trimmed })
+        .eq("user_id", user.id)
+
+      if (updateError) throw updateError
+
+      setUser({ ...user, name: trimmed })
+      toast.success("Changes saved.")
+    } catch (err) {
+      console.error("Failed to save settings:", err)
+      toast.error("Couldn't save your changes. Please try again.")
+    } finally {
+      setSaving(false)
     }
   }
 
+  const handleSignOut = async () => {
+    await signOut()
+    setUser(null)
+    router.push("/")
+  }
+
+  if (!user) {
+    return (
+      <div className="section-band">
+        <Container>
+          <div className="flex justify-center">
+            <Spinner />
+          </div>
+        </Container>
+      </div>
+    )
+  }
+
   return (
-    <div className="container mx-auto px-4 py-8 max-w-2xl space-y-8">
-      {/* Header */}
-      <motion.div
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        className="space-y-2"
-      >
-        <h1 className="text-3xl font-bold text-white">Settings</h1>
-        <p className="text-white/60">Customize your Mock'n-Hire experience</p>
-      </motion.div>
+    <div className="section-band">
+      <Container className="flex max-w-2xl flex-col gap-xl">
+        <div className="flex flex-col gap-xs">
+          <span className="eyebrow">Settings</span>
+          <h1 className="font-display text-display-md text-ink md:text-display-lg">
+            Your account
+          </h1>
+        </div>
 
-      {/* Appearance */}
-      <motion.div
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.1 }}
-      >
-        <GlassCard className="p-6 space-y-6">
-          <div className="flex items-center space-x-3">
-            <div className="p-2 rounded-lg bg-purple-500/20">
-              <Palette className="w-5 h-5 text-purple-400" />
-            </div>
-            <h2 className="text-xl font-semibold text-white">Appearance</h2>
-          </div>
+        {/* Profile */}
+        <Card variant="panel" className="flex flex-col gap-base">
+          <CardTitle>Profile</CardTitle>
 
-          <div className="space-y-6">
-            {/* Theme Toggle */}
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="font-medium text-white">Dark Mode</p>
-                <p className="text-sm text-white/60">Toggle between light and dark themes</p>
-              </div>
-              <Switch
-                checked={theme === 'dark'}
-                onCheckedChange={(checked) => setTheme(checked ? 'dark' : 'light')}
-              />
-            </div>
-
-            {/* Accent Color */}
-            <div className="space-y-3">
-              <p className="font-medium text-white">Accent Color</p>
-              <div className="grid grid-cols-2 gap-3">
-                <button
-                  onClick={() => setAccentColor('ice-blue')}
-                  className={`p-4 rounded-lg border-2 transition-all ${
-                    accentColor === 'ice-blue'
-                      ? 'border-blue-400 bg-blue-500/10'
-                      : 'border-white/10 bg-white/5 hover:bg-white/10'
-                  }`}
-                >
-                  <div className="w-8 h-8 mx-auto mb-2 rounded-full bg-gradient-to-r from-cyan-400 to-blue-500"></div>
-                  <p className="text-sm font-medium text-white">Ice Blue</p>
-                </button>
-                <button
-                  onClick={() => setAccentColor('aqua-green')}
-                  className={`p-4 rounded-lg border-2 transition-all ${
-                    accentColor === 'aqua-green'
-                      ? 'border-green-400 bg-green-500/10'
-                      : 'border-white/10 bg-white/5 hover:bg-white/10'
-                  }`}
-                >
-                  <div className="w-8 h-8 mx-auto mb-2 rounded-full bg-gradient-to-r from-green-400 to-cyan-500"></div>
-                  <p className="text-sm font-medium text-white">Aqua Green</p>
-                </button>
-              </div>
-            </div>
-          </div>
-        </GlassCard>
-      </motion.div>
-
-      {/* Profile */}
-      <motion.div
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.2 }}
-      >
-        <GlassCard className="p-6 space-y-6">
-          <div className="flex items-center space-x-3">
-            <div className="p-2 rounded-lg bg-blue-500/20">
-              <User className="w-5 h-5 text-blue-400" />
-            </div>
-            <h2 className="text-xl font-semibold text-white">Profile Information</h2>
-          </div>
-
-          <div className="space-y-4">
-            <GlassInput
-              label="Full Name"
-              value={formData.name}
-              onChange={(e) => setFormData({...formData, name: e.target.value})}
+          <Field label="Name" htmlFor="name" error={error ?? undefined}>
+            <Input
+              id="name"
+              value={name}
+              onChange={(e) => {
+                setName(e.target.value)
+                setError(null)
+              }}
+              invalid={!!error}
+              disabled={saving}
             />
-            <GlassInput
-              label="Email Address"
-              type="email"
-              value={formData.email}
-              onChange={(e) => setFormData({...formData, email: e.target.value})}
+          </Field>
+
+          <Field
+            label="Email"
+            htmlFor="email"
+            hint="Changing your email requires re-verification and isn't supported here yet."
+          >
+            <Input id="email" value={user.email} readOnly disabled />
+          </Field>
+
+          <Field label="Account type" htmlFor="role">
+            <Input
+              id="role"
+              value={user.role === "recruiter" ? "Recruiter" : "Candidate"}
+              readOnly
+              disabled
             />
-            <div className="pt-2">
-              <GlassButton
-                onClick={handleSave}
-                variant="primary"
-                className="flex items-center space-x-2"
-              >
-                <Save className="w-4 h-4" />
-                <span>Save Changes</span>
-              </GlassButton>
-            </div>
-          </div>
-        </GlassCard>
-      </motion.div>
+          </Field>
 
-      {/* Danger Zone */}
-      <motion.div
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.3 }}
-      >
-        <GlassCard className="p-6 space-y-6 border-red-500/20">
-          <div className="flex items-center space-x-3">
-            <div className="p-2 rounded-lg bg-red-500/20">
-              <Trash2 className="w-5 h-5 text-red-400" />
-            </div>
-            <h2 className="text-xl font-semibold text-white">Danger Zone</h2>
+          <div className="flex justify-end">
+            <Button onClick={handleSave} disabled={!dirty || saving}>
+              {saving && <Spinner className="size-4 border-white/40 border-t-white" />}
+              Save changes
+            </Button>
           </div>
+        </Card>
 
-          <div className="p-4 rounded-lg bg-red-500/5 border border-red-500/20">
-            <div className="space-y-3">
-              <div>
-                <p className="font-medium text-red-400">Delete Account</p>
-                <p className="text-sm text-white/60">
-                  This will permanently delete your account and all associated data. This action cannot be undone.
-                </p>
-              </div>
-              <GlassButton
-                onClick={handleDeleteAccount}
-                className="bg-red-500/20 hover:bg-red-500/30 border-red-400/30 text-red-400"
-              >
-                Delete Account
-              </GlassButton>
-            </div>
+        {/* Session */}
+        <Card variant="panel" className="flex flex-wrap items-center justify-between gap-base">
+          <div className="flex flex-col gap-xxs">
+            <CardTitle className="text-title-sm">Sign out</CardTitle>
+            <p className="text-body-md text-body">
+              End your session on this device.
+            </p>
           </div>
-        </GlassCard>
-      </motion.div>
+          <Button variant="outline" onClick={handleSignOut}>
+            Sign out
+          </Button>
+        </Card>
+
+        {/* Deletion */}
+        <Card variant="panel" className="flex flex-col gap-sm">
+          <CardTitle className="text-title-sm">Delete your account</CardTitle>
+          <p className="text-body-md text-body">
+            Deleting an account removes the auth record as well as your data, which has to
+            happen server-side. Email{" "}
+            <a
+              href="mailto:support@mocknhire.app?subject=Account%20deletion%20request"
+              className="text-ink underline underline-offset-4"
+            >
+              support@mocknhire.app
+            </a>{" "}
+            from this address and it will be actioned.
+          </p>
+        </Card>
+      </Container>
     </div>
   )
 }
