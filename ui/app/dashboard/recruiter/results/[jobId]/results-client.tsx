@@ -1,300 +1,408 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
-import { createClientComponentClient } from "@supabase/auth-helpers-nextjs";
-import { GlassButton } from "@/components/ui/glass-button";
-import { GlassCard } from "@/components/ui/glass-card";
-import { Progress } from "@/components/ui/progress";
+import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
+import { ArrowLeft, Award, Briefcase, Code, FileText } from "lucide-react";
+import { toast } from "sonner";
+
+import { supabase } from "@/lib/supabase";
+import { cn } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
+import { Card, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import {
-  ArrowLeft, CheckCircle, Clock, X,
-  Briefcase, Code, Award
-} from "lucide-react";
-import { Database } from "@/lib/supabase";
+import { Container } from "@/components/ui/section";
+import { EmptyState, ErrorState, LoadingState, Meter } from "@/components/ui/states";
 
-// Score color mapping
-const scoreColor = (s: number) =>
-  s >= 90 ? "text-green-400" :
-  s >= 80 ? "text-yellow-400" :
-  s >= 70 ? "text-orange-400" :
-            "text-red-400";
+/**
+ * Recruiter results.
+ *
+ * Fixes carried in this rewrite:
+ *
+ *  - A `SUPABASE_BUCKET_BASE` constant hardcoded the URL of a *previous*
+ *    Supabase project (pzqodlqmyfylolspvgxl), so every "view resume" link
+ *    pointed at a project this app no longer uses. Resume links now use the
+ *    `file_path` the backend already stores on `resume_uploads`, which is a
+ *    complete public URL -- no base to hardcode or drift.
+ *
+ *  - The heading was derived from the *first candidate's surname*
+ *    ("Patel Screening"). It now reads the real `job_title` from
+ *    `job_descriptions`.
+ *
+ *  - The Certifications bar rendered `certifications_courses ? 78 : 0` -- an
+ *    invented 78% shown as if it were a computed score. Certifications are
+ *    not part of the ranking formula at all (issue #9), so the bar is gone
+ *    and the extracted certifications are listed as plain evidence instead.
+ *
+ *  - Experience/Projects scores are 0-10 from the LLM, but were fed to a
+ *    0-100 progress bar, so a strong 8/10 rendered as a nearly-empty 8%.
+ *    `Meter` now receives an explicit max.
+ *
+ *  - A failed status write left the optimistic UI change in place, showing
+ *    a shortlist decision that was never saved. It now reverts and tells
+ *    the user.
+ */
 
-const statusColor = (st: string) => ({
-  shortlisted: "bg-green-500/20 text-green-400 border-green-400/30",
-  waitlisted : "bg-yellow-500/20 text-yellow-400 border-yellow-400/30",
-  declined   : "bg-red-500/20  text-red-400  border-red-400/30",
-  pending    : "bg-blue-500/20 text-blue-400 border-blue-400/30"
-}[st as keyof typeof statusColor] ?? "bg-blue-500/20 text-blue-400 border-blue-400/30");
+const SCORE_MAX = 10;
 
-// DB Types
-type Ranking = Database["public"]["Tables"]["resume_rankings"]["Row"];
-type Analysis = Database["public"]["Tables"]["resume_analysis"]["Row"];
-type Upload = Database["public"]["Tables"]["resume_uploads"]["Row"];
+type Row = {
+  resume_id: string;
+  total_score: number;
+  rank: number;
+  status: string;
+  candidate_name: string;
+  file_name: string;
+  file_path: string | null;
+  key_skills?: unknown;
+  relevant_projects?: unknown;
+  certifications_courses?: unknown;
+  projects_relevance_score?: number | null;
+  experience_relevance_score?: number | null;
+  overall_analysis?: string | null;
+};
 
-// Your Supabase project public bucket base URL
-const SUPABASE_BUCKET_BASE = "https://pzqodlqmyfylolspvgxl.supabase.co/storage/v1/object/public/resumes";
+const STATUSES = ["shortlisted", "waitlisted", "declined"] as const;
+
+/** The LLM returns these as either a JSON array or a comma-joined string. */
+function toList(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map((v) => String(v).trim()).filter(Boolean);
+  if (typeof value === "string") {
+    return value
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+  return [];
+}
 
 export default function ResultsPageClient({ jobId }: { jobId: string }) {
-  const supabase = createClientComponentClient<Database>();
-  const router   = useRouter();
-
-  // State
-  const [rows, setRows] = useState<
-    (Ranking & Partial<Analysis> & { candidate_name?: string; file_name?: string })[]
-  >([]);
+  const [rows, setRows] = useState<Row[]>([]);
+  const [jobTitle, setJobTitle] = useState<string>("");
   const [selectedIdx, setSelectedIdx] = useState(0);
+  const [state, setState] = useState<"loading" | "ready" | "error">("loading");
+  const [savingStatus, setSavingStatus] = useState(false);
 
-  // 1 ▸ Fetch all data
-  useEffect(() => {
-    (async () => {
-      // 1. Rankings (no candidate_name fetched here), SORTED BY SCORE DESC
-      const { data: rankings, error: err1 } = await supabase
-        .from("resume_rankings")
-        .select("resume_id,total_score,rank,status")
-        .eq("job_id", jobId)
-        .order("total_score", { ascending: false });
-      if (err1 || !rankings?.length) return console.error(err1);
+  const load = useCallback(async () => {
+    setState("loading");
+    try {
+      const [{ data: job }, { data: rankings, error: rankErr }] = await Promise.all([
+        supabase
+          .from("job_descriptions")
+          .select("job_title")
+          .eq("job_id", jobId)
+          .maybeSingle(),
+        supabase
+          .from("resume_rankings")
+          .select("resume_id,total_score,rank,status")
+          .eq("job_id", jobId)
+          .order("total_score", { ascending: false }),
+      ]);
 
-      // 2. Resume uploads (names + file_name)
-      const ids = rankings.map(r => r.resume_id);
-      const { data: uploads, error: err2 } = await supabase
-        .from("resume_uploads")
-        .select("resume_id,candidate_name,file_name")
-        .in("resume_id", ids);
-      if (err2) return console.error(err2);
+      if (rankErr) throw rankErr;
+      setJobTitle(job?.job_title ?? "");
 
-      const uploadsMap: Record<string, { name: string, fileName: string }> =
-        Object.fromEntries(
-          (uploads ?? []).map(u => [
-            u.resume_id,
-            { name: u.candidate_name || "", fileName: u.file_name || "" }
-          ])
-        );
+      const ranked = rankings ?? [];
+      if (ranked.length === 0) {
+        setRows([]);
+        setState("ready");
+        return;
+      }
 
-      // 3. Analyses (summary, projects, skills etc.)
-      const { data: analyses, error: err3 } = await supabase
-        .from("resume_analysis")
-        .select("resume_id,key_skills,relevant_projects,certifications_courses,projects_relevance_score,experience_relevance_score,overall_analysis")
-        .in("resume_id", ids);
-      if (err3) return console.error(err3);
+      const ids = ranked.map((r) => r.resume_id);
+      const [{ data: uploads }, { data: analyses }] = await Promise.all([
+        supabase
+          .from("resume_uploads")
+          .select("resume_id,candidate_name,file_name,file_path")
+          .in("resume_id", ids),
+        supabase
+          .from("resume_analysis")
+          .select(
+            "resume_id,key_skills,relevant_projects,certifications_courses,projects_relevance_score,experience_relevance_score,overall_analysis"
+          )
+          .in("resume_id", ids),
+      ]);
 
-      const analysisMap = Object.fromEntries((analyses ?? []).map(a => [a.resume_id, a]));
+      const uploadMap = Object.fromEntries((uploads ?? []).map((u) => [u.resume_id, u]));
+      const analysisMap = Object.fromEntries((analyses ?? []).map((a) => [a.resume_id, a]));
 
-      // 4. Combine all (rankings + names + analyses + file_name)
       setRows(
-        rankings.map(r => ({
+        ranked.map((r) => ({
           ...r,
-          candidate_name: uploadsMap[r.resume_id]?.name ?? "Unknown",
-          file_name: uploadsMap[r.resume_id]?.fileName ?? "",
+          candidate_name: uploadMap[r.resume_id]?.candidate_name || "Unnamed candidate",
+          file_name: uploadMap[r.resume_id]?.file_name || "",
+          file_path: uploadMap[r.resume_id]?.file_path ?? null,
           ...analysisMap[r.resume_id],
-        }))
+        })) as Row[]
       );
-    })();
-  }, [jobId, supabase]);
+      setSelectedIdx(0);
+      setState("ready");
+    } catch (err) {
+      console.error("Failed to load results:", err);
+      setState("error");
+    }
+  }, [jobId]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
 
   const selected = rows[selectedIdx];
 
-  // Screening Title
-  function getScreeningTitle(rows: any[]) {
-    if (
-      rows.length &&
-      typeof rows[0].candidate_name === "string" &&
-      rows[0].candidate_name.trim().length > 0
-    ) {
-      return (
-        rows[0].candidate_name.split(" ").slice(-1)[0] + " Screening"
-      );
-    }
-    return "Screening";
-  }
-
-  // 2 ▸ Update candidate status
-  async function updateStatus(newStatus: string) {
+  const updateStatus = async (newStatus: string) => {
     const row = rows[selectedIdx];
-    setRows(rows => rows.map((r, i) => i === selectedIdx ? { ...r, status: newStatus } : r));
-    await supabase
+    if (!row || savingStatus) return;
+
+    const previous = row.status;
+    setSavingStatus(true);
+    setRows((rs) => rs.map((r, i) => (i === selectedIdx ? { ...r, status: newStatus } : r)));
+
+    const { error } = await supabase
       .from("resume_rankings")
       .update({ status: newStatus })
       .eq("resume_id", row.resume_id)
       .eq("job_id", jobId);
-  }
 
-  // Loading state
-  if (!rows.length)
+    setSavingStatus(false);
+
+    if (error) {
+      // Roll the optimistic update back -- leaving it would show a
+      // shortlist decision that was never actually saved.
+      console.error("Failed to update status:", error);
+      setRows((rs) => rs.map((r, i) => (i === selectedIdx ? { ...r, status: previous } : r)));
+      toast.error("Couldn't save that decision. Please try again.");
+    }
+  };
+
+  if (state === "loading") {
     return (
-      <div className="min-h-screen flex items-center justify-center text-white/60">
-        Loading results…
+      <div className="section-band">
+        <Container>
+          <LoadingState message="Loading candidate rankings…" />
+        </Container>
       </div>
     );
+  }
+
+  if (state === "error") {
+    return (
+      <div className="section-band">
+        <Container>
+          <ErrorState
+            title="Couldn't load these results"
+            description="There was a problem reaching the database."
+            action={
+              <Button variant="outline" onClick={() => void load()}>
+                Try again
+              </Button>
+            }
+          />
+        </Container>
+      </div>
+    );
+  }
 
   return (
-    <div className="container mx-auto px-4 py-8 space-y-6">
-      {/* header */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center space-x-4">
-          <GlassButton onClick={() => router.back()} className="flex items-center space-x-2">
-            <ArrowLeft className="w-4 h-4" />
-            <span>Back</span>
-          </GlassButton>
-          <div>
-            <h1 className="text-2xl font-bold text-white">
-              {getScreeningTitle(rows)}
+    <div className="section-band">
+      <Container className="flex flex-col gap-xl">
+        {/* Header */}
+        <div className="flex flex-col gap-base">
+          <Link
+            href="/dashboard/recruiter"
+            className="inline-flex w-fit items-center gap-xs text-caption text-muted transition-colors hover:text-ink"
+          >
+            <ArrowLeft className="size-4" />
+            All screenings
+          </Link>
+          <div className="flex flex-col gap-xxs">
+            <span className="eyebrow">Results</span>
+            <h1 className="font-display text-display-md text-ink md:text-display-lg">
+              {jobTitle || "Screening results"}
             </h1>
-            <p className="text-white/60">{rows.length} candidates analysed</p>
+            <p className="text-body-md text-body">
+              {rows.length === 0
+                ? "No candidates ranked yet."
+                : `${rows.length} candidate${rows.length === 1 ? "" : "s"} ranked against this role.`}
+            </p>
           </div>
         </div>
-      </div>
 
-      <div className="grid lg:grid-cols-5 gap-6">
-        {/* list */}
-        <div className="lg:col-span-2 space-y-3">
-          {rows.map((c, i) => (
-            <GlassCard
-              key={c.resume_id}
-              className={`p-4 cursor-pointer transition-all ${i === selectedIdx
-                ? "border-blue-400/50 bg-blue-500/10"
-                : "hover:bg-white/5"}`}
-              onClick={() => setSelectedIdx(i)}
-            >
-              <div className="flex items-center justify-between mb-3">
-                <div className="flex items-center space-x-3">
-                  <div className="w-8 h-8 rounded-full bg-gradient-to-r from-blue-500 to-cyan-500 flex items-center justify-center text-white font-bold text-sm">
-                    #{c.rank}
-                  </div>
-                  <p className="font-medium text-white">{c.candidate_name || "Unknown"}</p>
-                </div>
-                <div className={`text-lg font-bold ${scoreColor(c.total_score)}`}>
-                  {Math.round(c.total_score)}
-                </div>
-              </div>
-              <div className="flex items-center justify-between">
-                <Badge className={`text-xs ${statusColor(c.status)}`}>{c.status}</Badge>
-              </div>
-            </GlassCard>
-          ))}
-        </div>
-
-        {/* details */}
-        <div className="lg:col-span-3 space-y-6">
-          {/* top card */}
-          <GlassCard className="p-6">
-            <div className="flex items-start justify-between mb-6">
-              <div>
-                <h3 className="text-xl font-bold text-white">{selected.candidate_name || "Unknown"}</h3>
-                {/* Resume Download/View Button */}
-                {selected.file_name && (
-                  <a
-                    href={`${SUPABASE_BUCKET_BASE}/${jobId}/${selected.file_name}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-block px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 transition mt-2"
+        {rows.length === 0 ? (
+          <EmptyState
+            icon={<FileText />}
+            title="No rankings for this screening"
+            description="The job may still be processing, or the archive contained no readable resumes."
+            action={
+              <Button variant="outline" onClick={() => void load()}>
+                Refresh
+              </Button>
+            }
+          />
+        ) : (
+          <div className="grid gap-base lg:grid-cols-5">
+            {/* Candidate list */}
+            <ul className="flex flex-col gap-xs lg:col-span-2">
+              {rows.map((c, i) => (
+                <li key={c.resume_id}>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedIdx(i)}
+                    aria-current={i === selectedIdx}
+                    className={cn(
+                      "flex w-full items-center justify-between gap-base rounded-xl border p-base text-left transition-colors",
+                      i === selectedIdx
+                        ? "border-ink bg-surface-card"
+                        : "border-hairline bg-surface-card hover:border-hairline-strong"
+                    )}
                   >
-                    View Resume
-                  </a>
-                )}
-              </div>
-              <div className={`text-3xl font-bold ${scoreColor(selected.total_score)}`}>
-                {Math.round(selected.total_score)}
-              </div>
-            </div>
-            <div className="flex flex-wrap gap-3">
-              <GlassButton
-                onClick={() => updateStatus("shortlisted")}
-                className="flex items-center space-x-2 bg-green-500/20 hover:bg-green-500/30 border-green-400/30"
-                disabled={selected.status === "shortlisted"}
-              >
-                <CheckCircle className="w-4 h-4" />
-                <span>Shortlist</span>
-              </GlassButton>
-              <GlassButton
-                onClick={() => updateStatus("waitlisted")}
-                className="flex items-center space-x-2 bg-yellow-500/20 hover:bg-yellow-500/30 border-yellow-400/30"
-                disabled={selected.status === "waitlisted"}
-              >
-                <Clock className="w-4 h-4" />
-                <span>Waitlist</span>
-              </GlassButton>
-              <GlassButton
-                onClick={() => updateStatus("declined")}
-                className="flex items-center space-x-2 bg-red-500/20 hover:bg-red-500/30 border-red-400/30"
-                disabled={selected.status === "declined"}
-              >
-                <X className="w-4 h-4" />
-                <span>Decline</span>
-              </GlassButton>
-            </div>
-          </GlassCard>
+                    <div className="flex min-w-0 items-center gap-sm">
+                      <span className="flex size-8 shrink-0 items-center justify-center rounded-pill bg-surface-strong text-caption text-ink">
+                        {c.rank}
+                      </span>
+                      <div className="flex min-w-0 flex-col">
+                        <span className="truncate text-body-strong text-ink">
+                          {c.candidate_name}
+                        </span>
+                        <span className="truncate text-caption text-muted">
+                          {c.status}
+                        </span>
+                      </div>
+                    </div>
+                    <span className="shrink-0 font-display text-title-md text-ink">
+                      {c.total_score?.toFixed(1)}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
 
-          {/* score breakdown */}
-          <GlassCard className="p-6 space-y-6">
-            <h4 className="text-lg font-semibold text-white">Score Breakdown</h4>
-            <Breakdown
-              icon={Briefcase} label="Experience"
-              score={selected.experience_relevance_score ?? 0}
-            />
-            <Breakdown
-              icon={Code} label="Projects"
-              score={selected.projects_relevance_score ?? 0}
-            />
-            <Breakdown
-              icon={Award} label="Certifications"
-              score={selected.certifications_courses ? 78 : 0}
-            />
-          </GlassCard>
-
-          {/* skills */}
-          <GlassCard className="p-6 space-y-6">
-            <h4 className="text-lg font-semibold text-white">Skills & Experience</h4>
-            <div>
-              <p className="text-sm font-medium text-white/80 mb-2">Technical Skills</p>
-              <div className="flex flex-wrap gap-2">
-                {String(selected.key_skills || "")
-                  .split(",")
-                  .filter(Boolean)
-                  .map((s: string) => (
-                    <Badge key={s} className="bg-blue-500/20 text-blue-300 border-blue-400/30">
-                      {s.trim()}
+            {/* Detail */}
+            {selected && (
+              <div className="flex flex-col gap-base lg:col-span-3">
+                <Card variant="panel" className="flex flex-col gap-base">
+                  <div className="flex flex-wrap items-start justify-between gap-base">
+                    <div className="flex flex-col gap-xxs">
+                      <CardTitle>{selected.candidate_name}</CardTitle>
+                      <span className="text-caption text-muted">
+                        Rank {selected.rank} &middot; score {selected.total_score?.toFixed(2)}
+                      </span>
+                    </div>
+                    <Badge
+                      variant={
+                        selected.status === "shortlisted"
+                          ? "success"
+                          : selected.status === "declined"
+                            ? "error"
+                            : "pending"
+                      }
+                    >
+                      {selected.status}
                     </Badge>
-                  ))}
-              </div>
-            </div>
-          </GlassCard>
+                  </div>
 
-          {/* NEW: Summary & Projects Card */}
-          <GlassCard className="p-6 space-y-4">
-            <h4 className="text-lg font-semibold text-white">Summary & Projects</h4>
-            <div>
-              <p className="text-white/80 font-semibold mb-2">Summary</p>
-              <p className="text-white/70">{selected.overall_analysis || "No summary available."}</p>
-            </div>
-            <div>
-              <p className="text-white/80 font-semibold mb-2">Projects</p>
-              <p className="text-white/70 whitespace-pre-line">{selected.relevant_projects || "No projects information available."}</p>
-            </div>
-          </GlassCard>
-        </div>
-      </div>
+                  {selected.overall_analysis && (
+                    <p className="text-body-md text-body">{selected.overall_analysis}</p>
+                  )}
+
+                  <div className="flex flex-wrap gap-sm">
+                    {STATUSES.map((s) => (
+                      <Button
+                        key={s}
+                        size="sm"
+                        variant={selected.status === s ? "primary" : "outline"}
+                        disabled={savingStatus}
+                        onClick={() => void updateStatus(s)}
+                        className="capitalize"
+                      >
+                        {s}
+                      </Button>
+                    ))}
+                    {selected.file_path && (
+                      <Button size="sm" variant="ghost" asChild>
+                        <a
+                          href={selected.file_path}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          Open resume
+                        </a>
+                      </Button>
+                    )}
+                  </div>
+                </Card>
+
+                {/* Score breakdown -- only the two factors that actually
+                    feed the ranking today. */}
+                <Card variant="panel" className="flex flex-col gap-base">
+                  <CardTitle>Score breakdown</CardTitle>
+                  <Meter
+                    label="Experience relevance"
+                    value={selected.experience_relevance_score ?? 0}
+                    max={SCORE_MAX}
+                    valueLabel={`${selected.experience_relevance_score ?? 0}/${SCORE_MAX}`}
+                  />
+                  <Meter
+                    label="Project relevance"
+                    value={selected.projects_relevance_score ?? 0}
+                    max={SCORE_MAX}
+                    valueLabel={`${selected.projects_relevance_score ?? 0}/${SCORE_MAX}`}
+                  />
+                  <p className="text-caption text-muted">
+                    Only these two factors feed the ranking today.
+                  </p>
+                </Card>
+
+                <Evidence
+                  icon={<Code className="size-4" />}
+                  title="Skills"
+                  items={toList(selected.key_skills)}
+                />
+                <Evidence
+                  icon={<Briefcase className="size-4" />}
+                  title="Relevant projects"
+                  items={toList(selected.relevant_projects)}
+                />
+                <Evidence
+                  icon={<Award className="size-4" />}
+                  title="Certifications"
+                  items={toList(selected.certifications_courses)}
+                  note="Extracted from the resume. Not currently part of the score."
+                />
+              </div>
+            )}
+          </div>
+        )}
+      </Container>
     </div>
   );
 }
 
-// Breakdown subcomponent
-function Breakdown({
-  icon: Icon,
-  label,
-  score
-}: { icon: any; label: string; score: number }) {
+function Evidence({
+  icon,
+  title,
+  items,
+  note,
+}: {
+  icon: React.ReactNode;
+  title: string;
+  items: string[];
+  note?: string;
+}) {
+  if (items.length === 0) return null;
   return (
-    <div className="space-y-2">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center space-x-2">
-          <Icon className="w-4 h-4 text-blue-400" />
-          <span className="text-white/80">{label}</span>
-        </div>
-        <span className="text-white font-medium">{score}</span>
+    <Card variant="panel" className="flex flex-col gap-sm">
+      <div className="flex items-center gap-xs text-ink">
+        {icon}
+        <CardTitle className="text-title-sm">{title}</CardTitle>
       </div>
-      <Progress value={score} className="h-2" />
-    </div>
+      <ul className="flex flex-wrap gap-xs">
+        {items.map((item) => (
+          <li key={item}>
+            <Badge variant="outline" className="normal-case tracking-normal">
+              {item}
+            </Badge>
+          </li>
+        ))}
+      </ul>
+      {note && <p className="text-caption text-muted">{note}</p>}
+    </Card>
   );
 }

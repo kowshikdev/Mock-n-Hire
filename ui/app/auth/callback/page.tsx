@@ -6,6 +6,7 @@ import { supabase } from '@/lib/supabase'
 import { useAppStore } from '@/lib/store'
 import { toast } from 'sonner'
 import { fetchUserWithRetry } from '@/lib/auth'
+import { LoadingState } from '@/components/ui/states'
 
 export default function AuthCallback() {
   const router = useRouter()
@@ -70,11 +71,8 @@ export default function AuthCallback() {
   }, [router, setUser])
 
   return (
-    <div className="min-h-screen flex items-center justify-center">
-      <div className="text-center">
-        <div className="w-16 h-16 mx-auto mb-4 border-4 border-blue-400/30 border-t-blue-400 rounded-full animate-spin"></div>
-        <p className="text-white/60">Completing authentication...</p>
-      </div>
+    <div className="flex min-h-[calc(100vh-4rem)] items-center justify-center">
+      <LoadingState message="Completing sign-in…" />
     </div>
   )
 }

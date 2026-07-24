@@ -1,185 +1,206 @@
 "use client";
 
-import { GlassButton } from "@/components/ui/glass-button";
-import { GlassCard } from "@/components/ui/glass-card";
+import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
+import { ArrowRight, FileText, Plus } from "lucide-react";
+
 import { useAppStore } from "@/lib/store";
 import { supabase } from "@/lib/supabase";
-import { useRouter } from "next/navigation";
-import { motion } from "framer-motion";
-import {
-  Plus, FileText, Clock, CheckCircle, Eye, Users, TrendingUp,
-} from "lucide-react";
-import { useEffect, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Card, CardTitle } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Container } from "@/components/ui/section";
+import { EmptyState, ErrorState, LoadingState, Stat } from "@/components/ui/states";
 import { NewScreeningModal } from "./components/new-screening-modal";
-import { createClientComponentClient } from "@supabase/auth-helpers-nextjs";
-import type { Database } from "@/lib/supabase";
 
-type Row = {
-  job_id   : string;
+type Job = {
+  job_id: string;
   job_title: string;
   created_at: string;
 };
 
-type Stat = { completed: number; total: number; };
+type JobStatus = { job_id: string; status: string };
 
-async function fetchSummary() {
-  const supabase = createClientComponentClient<Database>();
-
-  /* this RPC isn't deployed in your Supabase yet – call defensively */
-  // const { data, error } = await supabase.rpc("count_screenings_summary");
-
-  // if (error && (error as any).code === "PGRST116") return []; // 116 = function not found
-  // if (error) throw error;
-  // return data;
-  return { completed: 0, total: 0 }; // Temporary fallback
-}
+const dateFmt = new Intl.DateTimeFormat(undefined, {
+  day: "numeric",
+  month: "short",
+  year: "numeric",
+});
 
 export default function RecruiterDashboard() {
-  const { showNewScreeningModal, setShowNewScreeningModal } = useAppStore();
-  const router = useRouter();
+  const { showNewScreeningModal, setShowNewScreeningModal, user } = useAppStore();
 
-  const [list, setList] = useState<Row[]>([]);
-  const [stat, setStat] = useState<Stat>({ completed: 0, total: 0 });
+  const [jobs, setJobs] = useState<Job[]>([]);
+  const [statuses, setStatuses] = useState<Record<string, string>>({});
+  const [state, setState] = useState<"loading" | "ready" | "error">("loading");
 
-  /* fetch screenings + simple stats */
-  useEffect(() => { (async () => {
-    /* job rows */
-    const { data: jobs } = await supabase
-      .from("job_descriptions")
-      .select("job_id,job_title,created_at")
-      .order("created_at",{ ascending:false });
-
-    setList(jobs as Row[]);
-
-    /* quick aggregate for cards (optional) */
+  /*
+   * Screenings and their statuses are two separate tables, so both are
+   * fetched here and joined client-side by job_id.
+   *
+   * Neither query filters by user_id: RLS scopes `job_descriptions` to the
+   * owning recruiter, and `job_status` through its parent job. Adding an
+   * explicit filter would be redundant, and silently wrong if the policy
+   * ever changes.
+   */
+  const load = useCallback(async () => {
+    setState("loading");
     try {
-      const agg = await fetchSummary();
-      if (agg) setStat(agg as Stat);
-    } catch (err) {
-      console.error("Failed to fetch summary:", err);
-      setStat({ completed: 0, total: 0 });
-    }
-  })(); }, []);
+      const { data: jobRows, error: jobErr } = await supabase
+        .from("job_descriptions")
+        .select("job_id,job_title,created_at")
+        .order("created_at", { ascending: false });
 
-  /* ui helpers */
-  const color = (s: string) =>
-    s === "completed" ? "text-green-400 bg-green-500/10"
-    : s === "in-progress" ? "text-yellow-400 bg-yellow-500/10"
-    : "text-gray-400 bg-gray-500/10";
-  const icon = (s: string) =>
-    s === "completed" ? <CheckCircle className="w-4 h-4" />
-    : s === "in-progress" ? <Clock className="w-4 h-4" />
-    : <FileText className="w-4 h-4" />;
+      if (jobErr) throw jobErr;
+      const list = (jobRows ?? []) as Job[];
+      setJobs(list);
+
+      if (list.length > 0) {
+        const { data: statusRows, error: statusErr } = await supabase
+          .from("job_status")
+          .select("job_id,status")
+          .in(
+            "job_id",
+            list.map((j) => j.job_id)
+          );
+        if (statusErr) throw statusErr;
+
+        setStatuses(
+          Object.fromEntries(
+            ((statusRows ?? []) as JobStatus[]).map((r) => [r.job_id, r.status])
+          )
+        );
+      } else {
+        setStatuses({});
+      }
+
+      setState("ready");
+    } catch (err) {
+      console.error("Failed to load screenings:", err);
+      setState("error");
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  /*
+   * Counts are derived from the rows actually on screen. The previous
+   * dashboard called a fetchSummary() that returned a hardcoded
+   * { completed: 0, total: 0 } with the real RPC commented out, so both
+   * stat cards permanently read 0 regardless of how many screenings existed.
+   */
+  const total = jobs.length;
+  const completed = jobs.filter(
+    (j) => statuses[j.job_id]?.toLowerCase() === "complete"
+  ).length;
+  const running = total - completed;
 
   return (
     <>
-      <div className="container mx-auto px-4 py-8 pt-24 space-y-8">
-        {/* header */}
-        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}
-          className="space-y-2">
-          <h1 className="text-3xl font-bold text-white">Recruiter Dashboard</h1>
-          <p className="text-white/60">Manage your AI-powered screening campaigns</p>
-        </motion.div>
-
-        {/* quick stats */}
-        <StatsCard stat={stat} />
-
-        {/* new screening cta */}
-        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: .15 }}>
-          <GlassCard className="p-8 text-center space-y-4">
-            <div className="w-16 h-16 mx-auto rounded-xl bg-gradient-to-r
-                from-blue-500/20 to-cyan-500/20 flex items-center justify-center">
-              <Plus className="w-8 h-8 text-blue-400" />
+      <div className="section-band">
+        <Container className="flex flex-col gap-xl">
+          {/* Header */}
+          <div className="flex flex-col justify-between gap-base sm:flex-row sm:items-end">
+            <div className="flex flex-col gap-xs">
+              <span className="eyebrow">Recruiter</span>
+              <h1 className="font-display text-display-md text-ink md:text-display-lg">
+                {user?.name ? `Welcome back, ${user.name.split(" ")[0]}` : "Your screenings"}
+              </h1>
+              <p className="text-body-md text-body">
+                Upload candidate resumes against a role and review a ranked shortlist.
+              </p>
             </div>
-            <h3 className="text-xl font-semibold text-white">Start New Screening</h3>
-            <p className="text-white/60 max-w-md mx-auto">
-              Upload resumes and let our AI analyze and rank candidates
-            </p>
-            <GlassButton variant="primary"
-              onClick={() => setShowNewScreeningModal(true)}
-              className="inline-flex items-center gap-2">
-              <Plus className="w-5 h-5" /><span>Create New Screening</span>
-            </GlassButton>
-          </GlassCard>
-        </motion.div>
-
-        {/* recent screenings */}
-        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: .25 }} className="space-y-6">
-          <h2 className="text-xl font-semibold text-white">Recent Screenings</h2>
-          <div className="grid gap-4">
-            {list.map((j,i) => (
-              <motion.div key={j.job_id} initial={{ opacity: 0, x: -20 }}
-                animate={{ opacity: 1, x: 0 }} transition={{ delay: .3 + i * .05 }}>
-                <GlassCard className="p-6">
-                  <div className="flex items-center justify-between">
-                    <div className="space-y-2">
-                      <h3 className="text-lg font-semibold text-white">{j.job_title}</h3>
-                      <p className="text-sm text-white/60">
-                        Created: {new Date(j.created_at).toLocaleDateString()}
-                      </p>
-                    </div>
-
-                    <GlassButton size="sm" onClick={() =>
-                      router.push(`/dashboard/recruiter/results/${j.job_id}`)}
-                      className="flex items-center gap-1">
-                      <Eye className="w-4 h-4" /><span>View</span>
-                    </GlassButton>
-                  </div>
-                </GlassCard>
-              </motion.div>
-            ))}
+            <Button onClick={() => setShowNewScreeningModal(true)}>
+              <Plus />
+              New screening
+            </Button>
           </div>
-        </motion.div>
+
+          {/* Stats */}
+          {state === "ready" && total > 0 && (
+            <Card variant="panel" className="grid gap-lg sm:grid-cols-3">
+              <Stat value={total} label="Screenings" hint="Roles you've posted" />
+              <Stat value={completed} label="Completed" hint="Ranking finished" />
+              <Stat value={running} label="In progress" hint="Still processing" />
+            </Card>
+          )}
+
+          {/* List */}
+          {state === "loading" && <LoadingState message="Loading your screenings…" />}
+
+          {state === "error" && (
+            <ErrorState
+              title="Couldn't load your screenings"
+              description="There was a problem reaching the database. Check your connection and try again."
+              action={
+                <Button variant="outline" onClick={() => void load()}>
+                  Try again
+                </Button>
+              }
+            />
+          )}
+
+          {state === "ready" && total === 0 && (
+            <EmptyState
+              icon={<FileText />}
+              title="No screenings yet"
+              description="Post a role, upload a zip of resumes, and Mock'n-Hire will rank the candidates against the job description."
+              action={
+                <Button onClick={() => setShowNewScreeningModal(true)}>
+                  <Plus />
+                  Create your first screening
+                </Button>
+              }
+            />
+          )}
+
+          {state === "ready" && total > 0 && (
+            <ul className="flex flex-col gap-sm">
+              {jobs.map((job) => {
+                const status = statuses[job.job_id]?.toLowerCase();
+                const isComplete = status === "complete";
+                return (
+                  <li key={job.job_id}>
+                    <Card
+                      variant="feature"
+                      interactive
+                      className="flex flex-wrap items-center justify-between gap-base"
+                    >
+                      <div className="flex min-w-0 flex-col gap-xxs">
+                        <CardTitle className="truncate">{job.job_title}</CardTitle>
+                        <span className="text-caption text-muted">
+                          Created {dateFmt.format(new Date(job.created_at))}
+                        </span>
+                      </div>
+
+                      <div className="flex shrink-0 items-center gap-base">
+                        <Badge variant={isComplete ? "success" : "pending"}>
+                          {isComplete ? "Complete" : status ? "Processing" : "Pending"}
+                        </Badge>
+                        <Button variant="outline" size="sm" asChild>
+                          <Link href={`/dashboard/recruiter/results/${job.job_id}`}>
+                            View results
+                            <ArrowRight />
+                          </Link>
+                        </Button>
+                      </div>
+                    </Card>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </Container>
       </div>
 
-      <NewScreeningModal
-        open={showNewScreeningModal}
-        onClose={() => setShowNewScreeningModal(false)}
-      />
+      {showNewScreeningModal && (
+        <NewScreeningModal
+          open={showNewScreeningModal}
+          onClose={() => setShowNewScreeningModal(false)}
+        />
+      )}
     </>
   );
 }
-
-/* quick stat cards */
-const StatsCard = ({ stat }: { stat: any }) => (
-  <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}
-    transition={{ delay: .1 }} className="grid grid-cols-1 md:grid-cols-3 gap-6">
-    <GlassCard className="p-6" hover={false}>
-      <div className="flex items-center gap-4">
-        <div className="p-3 rounded-lg bg-blue-500/20">
-          <FileText className="w-6 h-6 text-blue-400" />
-        </div>
-        <div>
-          <p className="text-2xl font-bold text-white">{stat.total ?? "--"}</p>
-          <p className="text-white/60">Total Screenings</p>
-        </div>
-      </div>
-    </GlassCard>
-
-    <GlassCard className="p-6" hover={false}>
-      <div className="flex items-center gap-4">
-        <div className="p-3 rounded-lg bg-green-500/20">
-          <Users className="w-6 h-6 text-green-400" />
-        </div>
-        <div>
-          <p className="text-2xl font-bold text-white">{/* could calc */}--</p>
-          <p className="text-white/60">Candidates Screened</p>
-        </div>
-      </div>
-    </GlassCard>
-
-    <GlassCard className="p-6" hover={false}>
-      <div className="flex items-center gap-4">
-        <div className="p-3 rounded-lg bg-purple-500/20">
-          <TrendingUp className="w-6 h-6 text-purple-400" />
-        </div>
-        <div>
-          <p className="text-2xl font-bold text-white">{stat.completed ?? "--"}</p>
-          <p className="text-white/60">Completed Screenings</p>
-        </div>
-      </div>
-    </GlassCard>
-  </motion.div>
-);

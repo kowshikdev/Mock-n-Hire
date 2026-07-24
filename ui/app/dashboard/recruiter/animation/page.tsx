@@ -2,101 +2,176 @@
 
 import { Suspense, useEffect, useRef, useState } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
-import { motion } from "framer-motion";
-import { Brain, Clock } from "lucide-react";
-import { GlassCard } from "@/components/ui/glass-card";
-import { Progress } from "@/components/ui/progress";
+import Link from "next/link";
+
 import { API } from "@/lib/api";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { Container } from "@/components/ui/section";
+import { Meter, Spinner } from "@/components/ui/states";
+import { OrbField } from "@/components/ui/orb";
 
-/* ──────────────────────────────────────────────────────────────── */
+const POLL_MS = 5000;
+const MAX_POLLS = 60; // 5 minutes
 
-const LABELS = ["Uploading", "Parsing", "AI Analysis", "Ranking", "Complete"];
-
-// useSearchParams() forces a client-side-rendering bailout that Next.js 15
-// requires to sit inside a <Suspense> boundary; otherwise the static export
-// of this route errors. The real logic lives in AnimationInner, wrapped by
-// the default export below.
+/**
+ * Polls the screening job until the backend reports completion.
+ *
+ * Three bugs were fixed here:
+ *
+ *  1. The completion check was `status === "COMPLETE"`, but the backend
+ *     writes lowercase "complete" (api_service.py::update_job_status). The
+ *     comparison could never be true, so this screen polled until it hit
+ *     its retry cap on every single successful job.
+ *
+ *  2. It then redirected to `/dashboard/recruiter/results?job=<id>` -- a
+ *     query-param route that does not exist. The real page is the
+ *     path-based `/dashboard/recruiter/results/[jobId]`, so even a user who
+ *     got past (1) landed on a 404.
+ *
+ *  3. `pct` was in the effect's dependency array, so the interval was torn
+ *     down and rebuilt on every progress tick, and the `setStep` callback
+ *     read a stale `pct` from its closure. The interval is now created once
+ *     and all state updates are functional.
+ *
+ * The progress bar is deliberately asymptotic: the backend reports only
+ * pending/complete, so there is no real percentage to show. It eases toward
+ * 90% and only reaches 100% on actual confirmed completion, rather than
+ * implying a precision the API cannot provide.
+ */
 function AnimationInner() {
-  const qs     = useSearchParams();
-  const jobId  = qs.get("job");             // comes from ?job=<uuid>
+  const params = useSearchParams();
   const router = useRouter();
+  const jobId = params.get("job");
 
-  const [pct , setPct ] = useState(0);      // progress %
-  const [step, setStep] = useState(0);      // 0-4
-
-  const tries   = useRef(0);
-  const timer   = useRef<NodeJS.Timeout | null>(null);
+  const [pct, setPct] = useState(8);
+  const [state, setState] = useState<"working" | "done" | "timeout" | "missing">(
+    jobId ? "working" : "missing"
+  );
+  const pollCount = useRef(0);
 
   useEffect(() => {
     if (!jobId) return;
 
-    timer.current = setInterval(async () => {
-      tries.current += 1;
+    let cancelled = false;
 
-      setPct(p => Math.min(p + 3, 95));
-      setStep(s => (pct > 80 ? Math.min(s + 1, 3) : s));
+    // Asymptotic ease toward 90 -- never implies completion on its own.
+    const progress = setInterval(() => {
+      setPct((p) => (p >= 90 ? p : p + Math.max(0.5, (90 - p) * 0.06)));
+    }, 400);
+
+    const poll = setInterval(async () => {
+      pollCount.current += 1;
 
       try {
         const res = await API(`/status?job_id=${jobId}`);
-        const { status } = await res.json();
-
-        if (status === "COMPLETE") {
-          if (timer.current) clearInterval(timer.current);
-          setPct(100);
-          setStep(4);
-          setTimeout(() => {
-            router.push(`/dashboard/recruiter/results?job=${jobId}`);
-          }, 600); // quick finish animation
-          return;
+        if (res.ok) {
+          const { status } = await res.json();
+          // Compared case-insensitively so a change of casing on either
+          // side can't silently break completion again.
+          if (typeof status === "string" && status.toLowerCase() === "complete") {
+            if (cancelled) return;
+            clearInterval(poll);
+            clearInterval(progress);
+            setPct(100);
+            setState("done");
+            setTimeout(() => {
+              router.push(`/dashboard/recruiter/results/${jobId}`);
+            }, 700);
+            return;
+          }
         }
       } catch {
-        // ignore network hiccup
+        // A dropped request is expected on a cold backend; keep polling
+        // until the retry cap rather than failing the whole screen.
       }
 
-      if (tries.current >= 30) {
-        if (timer.current) clearInterval(timer.current);
-        router.back();
+      if (pollCount.current >= MAX_POLLS && !cancelled) {
+        clearInterval(poll);
+        clearInterval(progress);
+        setState("timeout");
       }
-    }, 5000);
+    }, POLL_MS);
 
     return () => {
-      if (timer.current) clearInterval(timer.current);
+      cancelled = true;
+      clearInterval(poll);
+      clearInterval(progress);
     };
-    // eslint-disable-next-line
-  }, [jobId, router, pct]);
+  }, [jobId, router]);
 
-  /* ───────── UI (intact theme) ──────────────────────────────── */
   return (
-    <div className="min-h-screen flex items-center justify-center p-4">
-      <motion.div
-        initial={{ opacity: 0, scale: .92 }}
-        animate={{ opacity: 1, scale: 1 }}
-        className="w-full max-w-md"
-      >
-        <GlassCard className="p-8 text-center space-y-8" hover={false}>
-          <div className="space-y-2">
-            <div className="w-16 h-16 mx-auto rounded-xl bg-blue-500/10 flex
-                            items-center justify-center">
-              <Brain className="w-8 h-8 text-blue-400" />
-            </div>
-            <h1 className="text-2xl font-bold text-white">Processing Resumes</h1>
-            <p className="text-white/60 flex items-center justify-center gap-1">
-              <Clock className="w-4 h-4" />
-              Step {step + 1}/5 – {LABELS[step]}
-            </p>
-          </div>
-
-          <Progress value={pct} className="h-2" />
-          <p className="text-sm text-white/50">{pct}%</p>
-        </GlassCard>
-      </motion.div>
+    <div className="section-band relative overflow-hidden">
+      <OrbField variant="corner" />
+      <Container>
+        <div className="mx-auto max-w-lg">
+          <Card variant="panel" className="flex flex-col items-center gap-lg text-center">
+            {state === "missing" ? (
+              <>
+                <h1 className="font-display text-display-sm text-ink">
+                  No screening specified
+                </h1>
+                <p className="text-body-md text-body">
+                  This page needs a screening to track. Head back to your dashboard and
+                  open one from there.
+                </p>
+                <Button asChild>
+                  <Link href="/dashboard/recruiter">Back to dashboard</Link>
+                </Button>
+              </>
+            ) : state === "timeout" ? (
+              <>
+                <h1 className="font-display text-display-sm text-ink">
+                  Still processing
+                </h1>
+                <p className="text-body-md text-body">
+                  This is taking longer than usual. The job is still running in the
+                  background — you can check the results page later.
+                </p>
+                <div className="flex flex-col gap-sm sm:flex-row">
+                  <Button asChild>
+                    <Link href={`/dashboard/recruiter/results/${jobId}`}>
+                      Open results
+                    </Link>
+                  </Button>
+                  <Button variant="outline" asChild>
+                    <Link href="/dashboard/recruiter">Back to dashboard</Link>
+                  </Button>
+                </div>
+              </>
+            ) : (
+              <>
+                <Spinner className="size-6" />
+                <div className="flex flex-col gap-xs">
+                  <h1 className="font-display text-display-sm text-ink">
+                    {state === "done" ? "Ranking complete" : "Screening candidates"}
+                  </h1>
+                  <p className="text-body-md text-body">
+                    {state === "done"
+                      ? "Taking you to the results…"
+                      : "Resumes are being parsed, analysed against the job description, and ranked. You can safely leave this page — the job keeps running."}
+                  </p>
+                </div>
+                <Meter value={pct} className="w-full" aria-label="Screening progress" />
+              </>
+            )}
+          </Card>
+        </div>
+      </Container>
     </div>
   );
 }
 
 export default function Animation() {
+  // useSearchParams needs a Suspense boundary for this route to prerender.
   return (
-    <Suspense fallback={null}>
+    <Suspense
+      fallback={
+        <div className="flex min-h-[50vh] items-center justify-center">
+          <Spinner />
+        </div>
+      }
+    >
       <AnimationInner />
     </Suspense>
   );

@@ -1,331 +1,208 @@
 "use client"
 
-import { GlassButton } from "@/components/ui/glass-button"
-import { GlassCard } from "@/components/ui/glass-card"
-import { Badge } from "@/components/ui/badge"
-import { motion } from "framer-motion"
-import { 
-  ArrowLeft, 
-  Eye, 
-  Calendar, 
-  TrendingUp, 
-  TrendingDown,
-  Minus,
-  Brain,
-  Download,
-  Filter
-} from "lucide-react"
-import { useRouter } from "next/navigation"
-import { useState } from "react"
+import { useCallback, useEffect, useMemo, useState } from "react"
+import Link from "next/link"
+import { ArrowRight, Mic, Search } from "lucide-react"
 
-const mockSessions = [
-  {
-    id: 'session-1',
-    date: '2024-01-15',
-    role: 'Senior Frontend Developer',
-    company: 'TechCorp Inc.',
-    duration: '12:45',
-    overallScore: 85,
-    stressLevel: 28,
-    questionsCount: 5,
-    status: 'completed'
-  },
-  {
-    id: 'session-2',
-    date: '2024-01-12',
-    role: 'Product Manager',
-    company: 'StartupXYZ',
-    duration: '15:30',
-    overallScore: 78,
-    stressLevel: 42,
-    questionsCount: 6,
-    status: 'completed'
-  },
-  {
-    id: 'session-3',
-    date: '2024-01-10',
-    role: 'Full Stack Developer',
-    company: 'DevStudio',
-    duration: '11:20',
-    overallScore: 92,
-    stressLevel: 22,
-    questionsCount: 4,
-    status: 'completed'
-  },
-  {
-    id: 'session-4',
-    date: '2024-01-08',
-    role: 'Data Scientist',
-    company: 'DataFlow',
-    duration: '14:15',
-    overallScore: 71,
-    stressLevel: 55,
-    questionsCount: 5,
-    status: 'completed'
-  },
-  {
-    id: 'session-5',
-    date: '2024-01-05',
-    role: 'UX Designer',
-    company: 'DesignHub',
-    duration: '10:45',
-    overallScore: 88,
-    stressLevel: 31,
-    questionsCount: 4,
-    status: 'completed'
-  },
-  {
-    id: 'session-6',
-    date: '2024-01-03',
-    role: 'Backend Developer',
-    company: 'CloudTech',
-    duration: '13:25',
-    overallScore: 76,
-    stressLevel: 38,
-    questionsCount: 5,
-    status: 'completed'
-  }
-]
+import { supabase } from "@/lib/supabase"
+import { useAppStore } from "@/lib/store"
+import { Button } from "@/components/ui/button"
+import { Card, CardTitle } from "@/components/ui/card"
+import { Badge } from "@/components/ui/badge"
+import { Input } from "@/components/ui/input"
+import { Container } from "@/components/ui/section"
+import { EmptyState, ErrorState, LoadingState, Stat } from "@/components/ui/states"
+
+/**
+ * Session history.
+ *
+ * This page previously rendered a `mockSessions` array of six invented
+ * sessions -- hardcoded roles, scores and dates -- with no backend call
+ * anywhere in the file. Every user saw the same six fabricated results,
+ * including users who had never run a session. It now reads the real
+ * `mock_interview_sessions` rows for the signed-in user (scoped by RLS)
+ * and has a genuine empty state.
+ */
+
+type SessionRow = {
+  id: string
+  start_time: string | null
+  end_time: string | null
+  status: string | null
+  overall_score: number | null
+}
+
+const dateFmt = new Intl.DateTimeFormat(undefined, {
+  day: "numeric",
+  month: "short",
+  year: "numeric",
+})
 
 export default function SessionHistoryPage() {
-  const [filter, setFilter] = useState<'all' | 'high' | 'medium' | 'low'>('all')
-  const router = useRouter()
+  const { user } = useAppStore()
+  const userId = user?.id
 
-  const getScoreColor = (score: number) => {
-    if (score >= 85) return 'text-green-400 bg-green-500/10 border-green-400/30'
-    if (score >= 75) return 'text-blue-400 bg-blue-500/10 border-blue-400/30'
-    if (score >= 65) return 'text-yellow-400 bg-yellow-500/10 border-yellow-400/30'
-    return 'text-red-400 bg-red-500/10 border-red-400/30'
-  }
+  const [sessions, setSessions] = useState<SessionRow[]>([])
+  const [state, setState] = useState<"loading" | "ready" | "error">("loading")
+  const [query, setQuery] = useState("")
 
-  const getStressColor = (stress: number) => {
-    if (stress <= 30) return 'text-green-400'
-    if (stress <= 50) return 'text-yellow-400'
-    return 'text-red-400'
-  }
+  const load = useCallback(async () => {
+    if (!userId) return
+    setState("loading")
+    try {
+      const { data, error } = await supabase
+        .from("mock_interview_sessions")
+        .select("id,start_time,end_time,status,overall_score")
+        .eq("user_id", userId)
+        .order("start_time", { ascending: false })
 
-  const getStressIcon = (stress: number) => {
-    if (stress <= 30) return <TrendingDown className="w-4 h-4" />
-    if (stress <= 50) return <Minus className="w-4 h-4" />
-    return <TrendingUp className="w-4 h-4" />
-  }
+      if (error) throw error
+      setSessions((data ?? []) as SessionRow[])
+      setState("ready")
+    } catch (err) {
+      console.error("Failed to load session history:", err)
+      setState("error")
+    }
+  }, [userId])
 
-  const filteredSessions = mockSessions.filter(session => {
-    if (filter === 'all') return true
-    if (filter === 'high') return session.overallScore >= 85
-    if (filter === 'medium') return session.overallScore >= 70 && session.overallScore < 85
-    if (filter === 'low') return session.overallScore < 70
-    return true
-  })
+  useEffect(() => {
+    void load()
+  }, [load])
 
-  const averageScore = Math.round(
-    mockSessions.reduce((acc, session) => acc + session.overallScore, 0) / mockSessions.length
-  )
+  const filtered = useMemo(() => {
+    if (!query.trim()) return sessions
+    const q = query.trim().toLowerCase()
+    return sessions.filter((s) => {
+      const date = s.start_time ? dateFmt.format(new Date(s.start_time)).toLowerCase() : ""
+      return date.includes(q) || (s.status ?? "").toLowerCase().includes(q)
+    })
+  }, [sessions, query])
 
-  const averageStress = Math.round(
-    mockSessions.reduce((acc, session) => acc + session.stressLevel, 0) / mockSessions.length
-  )
+  /*
+   * Aggregates are computed only from sessions that actually carry a score.
+   * Treating an unscored session as 0 would drag the average down and
+   * misreport the user's own history back to them.
+   */
+  const scored = sessions.filter((s) => typeof s.overall_score === "number")
+  const averageScore =
+    scored.length > 0
+      ? scored.reduce((sum, s) => sum + (s.overall_score as number), 0) / scored.length
+      : null
+  const bestScore =
+    scored.length > 0 ? Math.max(...scored.map((s) => s.overall_score as number)) : null
 
   return (
-    <div className="container mx-auto px-4 py-8 space-y-8">
-      {/* Header */}
-      <motion.div
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        className="flex items-center justify-between"
-      >
-        <div className="flex items-center space-x-4">
-          <GlassButton
-            onClick={() => router.back()}
-            className="flex items-center space-x-2"
-          >
-            <ArrowLeft className="w-4 h-4" />
-            <span>Back</span>
-          </GlassButton>
-          <div>
-            <h1 className="text-3xl font-bold text-white">Interview History</h1>
-            <p className="text-white/60">Track your progress and performance over time</p>
-          </div>
+    <div className="section-band">
+      <Container className="flex flex-col gap-xl">
+        <div className="flex flex-col gap-xs">
+          <span className="eyebrow">History</span>
+          <h1 className="font-display text-display-md text-ink md:text-display-lg">
+            Your practice sessions
+          </h1>
+          <p className="text-body-md text-body">
+            Every interview you&rsquo;ve run, with the report attached.
+          </p>
         </div>
-        
-        <GlassButton
-          variant="primary"
-          className="flex items-center space-x-2"
-        >
-          <Download className="w-4 h-4" />
-          <span>Export All</span>
-        </GlassButton>
-      </motion.div>
 
-      {/* Stats Overview */}
-      <motion.div
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.1 }}
-        className="grid grid-cols-1 md:grid-cols-4 gap-6"
-      >
-        <GlassCard className="p-6 text-center" hover={false}>
-          <div className="space-y-2">
-            <div className="text-3xl font-bold text-blue-400">{mockSessions.length}</div>
-            <p className="text-white/60">Total Sessions</p>
-          </div>
-        </GlassCard>
+        {state === "loading" && <LoadingState message="Loading your history…" />}
 
-        <GlassCard className="p-6 text-center" hover={false}>
-          <div className="space-y-2">
-            <div className={`text-3xl font-bold ${getScoreColor(averageScore).split(' ')[0]}`}>
-              {averageScore}%
+        {state === "error" && (
+          <ErrorState
+            title="Couldn't load your history"
+            description="There was a problem reaching the database."
+            action={
+              <Button variant="outline" onClick={() => void load()}>
+                Try again
+              </Button>
+            }
+          />
+        )}
+
+        {state === "ready" && sessions.length === 0 && (
+          <EmptyState
+            icon={<Mic />}
+            title="No sessions yet"
+            description="Once you run a practice interview it'll show up here, along with its report."
+            action={
+              <Button asChild>
+                <Link href="/dashboard/student">Start your first interview</Link>
+              </Button>
+            }
+          />
+        )}
+
+        {state === "ready" && sessions.length > 0 && (
+          <>
+            <Card variant="panel" className="grid gap-lg sm:grid-cols-3">
+              <Stat value={sessions.length} label="Sessions" hint="Interviews run" />
+              <Stat
+                value={averageScore != null ? averageScore.toFixed(1) : "—"}
+                label="Average score"
+                hint={scored.length > 0 ? `Across ${scored.length} scored` : "None scored yet"}
+              />
+              <Stat
+                value={bestScore != null ? bestScore.toFixed(1) : "—"}
+                label="Best score"
+                hint="Highest so far"
+              />
+            </Card>
+
+            <div className="relative max-w-sm">
+              <Search className="pointer-events-none absolute left-sm top-1/2 size-4 -translate-y-1/2 text-muted" />
+              <Input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Filter by date or status"
+                className="pl-9"
+                aria-label="Filter sessions"
+              />
             </div>
-            <p className="text-white/60">Average Score</p>
-          </div>
-        </GlassCard>
 
-        <GlassCard className="p-6 text-center" hover={false}>
-          <div className="space-y-2">
-            <div className={`text-3xl font-bold ${getStressColor(averageStress)}`}>
-              {averageStress}%
-            </div>
-            <p className="text-white/60">Average Stress</p>
-          </div>
-        </GlassCard>
-
-        <GlassCard className="p-6 text-center" hover={false}>
-          <div className="space-y-2">
-            <div className="text-3xl font-bold text-green-400">
-              {mockSessions.filter(s => s.overallScore >= 80).length}
-            </div>
-            <p className="text-white/60">High Scores</p>
-          </div>
-        </GlassCard>
-      </motion.div>
-
-      {/* Filters */}
-      <motion.div
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.2 }}
-        className="flex items-center space-x-4"
-      >
-        <div className="flex items-center space-x-2">
-          <Filter className="w-4 h-4 text-white/60" />
-          <span className="text-white/80 font-medium">Filter by performance:</span>
-        </div>
-        
-        <div className="flex space-x-2">
-          {[
-            { key: 'all', label: 'All Sessions' },
-            { key: 'high', label: 'High (85%+)' },
-            { key: 'medium', label: 'Medium (70-84%)' },
-            { key: 'low', label: 'Low (<70%)' }
-          ].map((filterOption) => (
-            <GlassButton
-              key={filterOption.key}
-              onClick={() => setFilter(filterOption.key as any)}
-              className={`text-sm ${
-                filter === filterOption.key 
-                  ? 'bg-blue-500/20 border-blue-400/30 text-blue-300' 
-                  : ''
-              }`}
-            >
-              {filterOption.label}
-            </GlassButton>
-          ))}
-        </div>
-      </motion.div>
-
-      {/* Sessions List */}
-      <motion.div
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.3 }}
-        className="space-y-4"
-      >
-        {filteredSessions.map((session, index) => (
-          <motion.div
-            key={session.id}
-            initial={{ opacity: 0, x: -20 }}
-            animate={{ opacity: 1, x: 0 }}
-            transition={{ delay: 0.4 + index * 0.1 }}
-          >
-            <GlassCard className="p-6">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center space-x-6">
-                  {/* Date */}
-                  <div className="flex items-center space-x-2 text-white/60">
-                    <Calendar className="w-4 h-4" />
-                    <span className="text-sm">{session.date}</span>
-                  </div>
-
-                  {/* Role & Company */}
-                  <div>
-                    <h3 className="font-semibold text-white">{session.role}</h3>
-                    <p className="text-sm text-white/60">{session.company}</p>
-                  </div>
-
-                  {/* Duration */}
-                  <div className="text-center">
-                    <p className="text-sm font-medium text-white">{session.duration}</p>
-                    <p className="text-xs text-white/60">Duration</p>
-                  </div>
-
-                  {/* Questions */}
-                  <div className="text-center">
-                    <p className="text-sm font-medium text-white">{session.questionsCount}</p>
-                    <p className="text-xs text-white/60">Questions</p>
-                  </div>
-                </div>
-
-                <div className="flex items-center space-x-4">
-                  {/* Stress Level */}
-                  <div className="flex items-center space-x-2">
-                    {getStressIcon(session.stressLevel)}
-                    <span className={`text-sm font-medium ${getStressColor(session.stressLevel)}`}>
-                      {session.stressLevel}% stress
-                    </span>
-                  </div>
-
-                  {/* Score Badge */}
-                  <Badge className={`${getScoreColor(session.overallScore)} font-medium`}>
-                    {session.overallScore}% score
-                  </Badge>
-
-                  {/* View Button */}
-                  <GlassButton
-                    onClick={() => router.push(`/interview/${session.id}/summary`)}
-                    className="flex items-center space-x-2"
-                  >
-                    <Eye className="w-4 h-4" />
-                    <span>View Report</span>
-                  </GlassButton>
-                </div>
-              </div>
-            </GlassCard>
-          </motion.div>
-        ))}
-      </motion.div>
-
-      {/* Empty State */}
-      {filteredSessions.length === 0 && (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          className="text-center py-12"
-        >
-          <GlassCard className="p-8 max-w-md mx-auto">
-            <Brain className="w-12 h-12 mx-auto mb-4 text-white/40" />
-            <h3 className="text-lg font-semibold text-white mb-2">No sessions found</h3>
-            <p className="text-white/60 mb-4">
-              No interview sessions match your current filter criteria.
-            </p>
-            <GlassButton
-              onClick={() => setFilter('all')}
-              variant="primary"
-            >
-              Show All Sessions
-            </GlassButton>
-          </GlassCard>
-        </motion.div>
-      )}
+            {filtered.length === 0 ? (
+              <p className="text-body-md text-muted">No sessions match that filter.</p>
+            ) : (
+              <ul className="flex flex-col gap-sm">
+                {filtered.map((s) => {
+                  const complete = s.status?.toLowerCase() === "completed"
+                  return (
+                    <li key={s.id}>
+                      <Card
+                        variant="feature"
+                        interactive
+                        className="flex flex-wrap items-center justify-between gap-base"
+                      >
+                        <div className="flex flex-col gap-xxs">
+                          <CardTitle className="text-title-sm">
+                            {s.start_time
+                              ? dateFmt.format(new Date(s.start_time))
+                              : "Practice session"}
+                          </CardTitle>
+                          <span className="text-caption text-muted">
+                            {s.overall_score != null
+                              ? `Score ${Number(s.overall_score).toFixed(1)}`
+                              : "Not scored"}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-base">
+                          <Badge variant={complete ? "success" : "pending"}>
+                            {s.status ?? "in progress"}
+                          </Badge>
+                          <Button variant="outline" size="sm" asChild>
+                            <Link href={`/interview/${s.id}/summary`}>
+                              Report
+                              <ArrowRight />
+                            </Link>
+                          </Button>
+                        </div>
+                      </Card>
+                    </li>
+                  )
+                })}
+              </ul>
+            )}
+          </>
+        )}
+      </Container>
     </div>
   )
 }

@@ -1,31 +1,38 @@
 'use client';
 
-import { useTheme } from 'next-themes';
 import { Toaster as Sonner } from 'sonner';
 
 type ToasterProps = React.ComponentProps<typeof Sonner>;
 
-const Toaster = ({ ...props }: ToasterProps) => {
-  const { theme = 'system' } = useTheme();
-
-  return (
-    <Sonner
-      theme={theme as ToasterProps['theme']}
-      className="toaster group"
-      toastOptions={{
-        classNames: {
-          toast:
-            'group toast group-[.toaster]:bg-background group-[.toaster]:text-foreground group-[.toaster]:border-border group-[.toaster]:shadow-lg',
-          description: 'group-[.toast]:text-muted-foreground',
-          actionButton:
-            'group-[.toast]:bg-primary group-[.toast]:text-primary-foreground',
-          cancelButton:
-            'group-[.toast]:bg-muted group-[.toast]:text-muted-foreground',
-        },
-      }}
-      {...props}
-    />
-  );
-};
+/**
+ * Toast surface.
+ *
+ * Was wired to next-themes' useTheme() and styled with `bg-background` /
+ * `text-foreground` / `border-border`. Both are dead now: there is no theme
+ * provider (one fixed canvas), and those CSS variables no longer exist in
+ * the token set, so every one of those classes compiled to nothing and
+ * toasts rendered unstyled.
+ */
+const Toaster = ({ ...props }: ToasterProps) => (
+  <Sonner
+    theme="light"
+    className="toaster group"
+    toastOptions={{
+      classNames: {
+        toast:
+          'group toast rounded-lg border border-hairline bg-surface-card text-ink shadow-soft font-sans',
+        title: 'text-body-strong',
+        description: 'group-[.toast]:text-body',
+        actionButton:
+          'group-[.toast]:bg-ink-primary group-[.toast]:text-on-primary group-[.toast]:rounded-pill',
+        cancelButton:
+          'group-[.toast]:bg-surface-strong group-[.toast]:text-ink group-[.toast]:rounded-pill',
+        error: 'group-[.toaster]:text-error',
+        success: 'group-[.toaster]:text-ink',
+      },
+    }}
+    {...props}
+  />
+);
 
 export { Toaster };

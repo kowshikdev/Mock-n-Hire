@@ -1,9 +1,10 @@
 "use client"
 
-import { GlassButton } from "@/components/ui/glass-button"
-import { GlassCard } from "@/components/ui/glass-card"
-import { Progress } from "@/components/ui/progress"
-import { motion, AnimatePresence } from "framer-motion"
+import { Button } from "@/components/ui/button"
+import { Card } from "@/components/ui/card"
+import { Badge } from "@/components/ui/badge"
+import { Meter, Spinner } from "@/components/ui/states"
+import { Wordmark } from "@/components/layout/wordmark"
 import { Mic, MicOff, Video, VideoOff, SkipForward, CheckCircle } from "lucide-react"
 import { useRouter } from "next/navigation"
 import { useState, useEffect, useRef } from "react"
@@ -342,163 +343,136 @@ export default function InterviewPageClient({ sessionIdParam }: { sessionIdParam
     return `${m}:${sec.toString().padStart(2, "0")}`
   }
 
-  return (
-    <div className="min-h-screen flex items-center justify-center p-4">
-      <motion.div
-        initial={{ opacity: 0, scale: 0.95 }}
-        animate={{ opacity: 1, scale: 1 }}
-        className="max-w-4xl w-full space-y-6"
-      >
-        {/* Progress Header */}
-        <GlassCard className="p-6">
-          <div className="flex items-center justify-between mb-4">
-            <div>
-              <h1 className="text-xl font-bold text-white">Mock Interview</h1>
-              <p className="text-white/60">
-                Question {currentQuestionIndex + 1} of {questions.length}
-              </p>
-            </div>
-            <div className="text-right">
-              <p className="text-2xl font-bold text-white">{formatTime(timeLeft)}</p>
-              <p className="text-white/60">Time Remaining</p>
-            </div>
-          </div>
-          <Progress value={progress} className="h-2" />
-        </GlassCard>
+  const isLastQuestion = currentQuestionIndex + 1 >= questions.length
 
-        <div className="grid lg:grid-cols-3 gap-6">
-          {/* Video Feed */}
-          <motion.div
-            initial={{ opacity: 0, x: -20 }}
-            animate={{ opacity: 1, x: 0 }}
-            className="lg:col-span-1"
-          >
-            <GlassCard className="p-6 space-y-4">
-              <h3 className="font-semibold text-white">Video Preview</h3>
-              <div className="relative aspect-video bg-gray-900 rounded-lg overflow-hidden">
+  return (
+    <div className="min-h-screen bg-canvas">
+      {/* Minimal in-interview bar. Deliberately not the site navbar: this is
+          a timed, camera-on task, and a "Settings" link mid-recording is an
+          invitation to destroy a session in progress. */}
+      <header className="border-b border-hairline bg-canvas">
+        <div className="container-content flex h-16 items-center justify-between gap-base">
+          <Wordmark />
+          <div className="flex items-center gap-base">
+            {isRecording && (
+              <span className="flex items-center gap-xs text-caption text-error">
+                <span className="size-2 animate-pulse rounded-pill bg-error" />
+                Recording
+              </span>
+            )}
+            <span
+              className="font-display text-title-md tabular-nums text-ink"
+              aria-live="polite"
+              aria-label={`${timeLeft} seconds remaining`}
+            >
+              {formatTime(timeLeft)}
+            </span>
+          </div>
+        </div>
+      </header>
+
+      <div className="container-content py-xl">
+        <div className="mx-auto flex max-w-5xl flex-col gap-base">
+          {/* Progress */}
+          <div className="flex flex-col gap-xs">
+            <div className="flex items-baseline justify-between gap-sm">
+              <span className="eyebrow">
+                Question {currentQuestionIndex + 1} of {questions.length}
+              </span>
+              {currentQuestion?.category && (
+                <Badge variant="default">{currentQuestion.category}</Badge>
+              )}
+            </div>
+            <Meter value={progress} aria-label="Interview progress" />
+          </div>
+
+          <div className="grid gap-base lg:grid-cols-3">
+            {/* Camera */}
+            <Card variant="panel" className="flex flex-col gap-base lg:col-span-1">
+              <div className="relative aspect-video overflow-hidden rounded-lg bg-surface-dark">
                 <video
                   ref={videoRef}
                   autoPlay
                   muted
                   playsInline
-                  className={`w-full h-full object-cover ${!videoEnabled ? "opacity-0" : ""}`}
+                  className={`size-full object-cover ${!videoEnabled ? "opacity-0" : ""}`}
                 />
                 {!videoEnabled && (
-                  <div className="absolute inset-0 flex items-center justify-center bg-gray-800">
-                    <VideoOff className="w-12 h-12 text-white/40" />
-                  </div>
-                )}
-                {isRecording && (
-                  <div className="absolute top-4 right-4">
-                    <div className="flex items-center space-x-2 bg-red-500/20 backdrop-blur-sm rounded-full px-3 py-1">
-                      <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse"></div>
-                      <span className="text-red-400 text-sm font-medium">REC</span>
-                    </div>
+                  <div className="absolute inset-0 flex items-center justify-center">
+                    <VideoOff className="size-8 text-on-dark-soft" />
                   </div>
                 )}
               </div>
-              <div className="flex justify-center space-x-3">
-                <GlassButton
+              <div className="flex justify-center gap-sm">
+                <Button
+                  variant={videoEnabled ? "outline" : "destructive"}
+                  size="icon"
                   onClick={toggleVideo}
-                  className={`p-3 ${!videoEnabled ? "bg-red-500/20 border-red-400/30" : ""}`}
+                  aria-label={videoEnabled ? "Turn camera off" : "Turn camera on"}
+                  aria-pressed={!videoEnabled}
                 >
-                  {videoEnabled ? <Video className="w-5 h-5" /> : <VideoOff className="w-5 h-5" />}
-                </GlassButton>
-                <GlassButton
+                  {videoEnabled ? <Video /> : <VideoOff />}
+                </Button>
+                <Button
+                  variant={audioEnabled ? "outline" : "destructive"}
+                  size="icon"
                   onClick={toggleAudio}
-                  className={`p-3 ${!audioEnabled ? "bg-red-500/20 border-red-400/30" : ""}`}
+                  aria-label={audioEnabled ? "Mute microphone" : "Unmute microphone"}
+                  aria-pressed={!audioEnabled}
                 >
-                  {audioEnabled ? <Mic className="w-5 h-5" /> : <MicOff className="w-5 h-5" />}
-                </GlassButton>
+                  {audioEnabled ? <Mic /> : <MicOff />}
+                </Button>
               </div>
-            </GlassCard>
-          </motion.div>
+              {!audioEnabled && (
+                <p className="text-caption text-error">
+                  Your microphone is muted. Your answer won&rsquo;t be recorded.
+                </p>
+              )}
+            </Card>
 
-          {/* Question & Controls */}
-          <motion.div
-            initial={{ opacity: 0, x: 20 }}
-            animate={{ opacity: 1, x: 0 }}
-            className="lg:col-span-2"
-          >
-            <GlassCard className="p-8 space-y-6">
-              <div className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className="px-3 py-1 rounded-full bg-blue-500/20 text-blue-300 text-sm font-medium">
-                    {currentQuestion?.category || ""}
-                  </span>
-                  <span className="text-white/60 text-sm">
-                    {currentQuestion?.time_limit
-                      ? `${currentQuestion.time_limit / 60} minute${currentQuestion.time_limit! > 60 ? "s" : ""} to answer`
-                      : ""}
-                  </span>
-                </div>
-
-                <AnimatePresence mode="wait">
-                  <motion.h2
-                    key={currentQuestion?.question_number}
-                    initial={{ opacity: 0, y: 20 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: -20 }}
-                    className="text-2xl font-bold text-white leading-relaxed"
-                  >
-                    {currentQuestion?.question_text || ""}
-                  </motion.h2>
-                </AnimatePresence>
-              </div>
+            {/* Question */}
+            <Card variant="panel" className="flex flex-col gap-lg lg:col-span-2">
+              <h1 className="font-display text-display-sm text-ink md:text-display-md">
+                {currentQuestion?.question_text || ""}
+              </h1>
 
               {!isAnswering ? (
-                <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-4">
-                  <div className="p-4 rounded-lg bg-blue-500/10 border border-blue-400/20">
-                    <p className="text-blue-300 text-sm">
-                      <strong>Instructions:</strong> Click &quot;Start Recording&quot; when you&apos;re
-                      ready to answer. You&apos;ll have {formatTime(currentQuestion?.time_limit ?? 120)} to
-                      provide your response. Speak clearly and take your time.
-                    </p>
-                  </div>
-                  <GlassButton
-                    onClick={startAnswering}
-                    variant="primary"
-                    className="w-full flex items-center justify-center space-x-2 py-4"
-                    disabled={loading}
-                  >
-                    <Mic className="w-5 h-5" />
-                    <span>Start Recording</span>
-                  </GlassButton>
-                </motion.div>
+                <div className="mt-auto flex flex-col gap-base">
+                  <p className="text-body-md text-body">
+                    You&rsquo;ll have {formatTime(currentQuestion?.time_limit ?? 120)} once you
+                    start. Speak naturally &mdash; your answer is transcribed and scored
+                    afterwards.
+                  </p>
+                  <Button size="lg" onClick={startAnswering} disabled={loading}>
+                    {loading ? (
+                      <Spinner className="size-4 border-white/40 border-t-white" />
+                    ) : (
+                      <Mic />
+                    )}
+                    Start recording
+                  </Button>
+                </div>
               ) : (
-                <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-4">
-                  <div className="p-4 rounded-lg bg-green-500/10 border border-green-400/20">
-                    <p className="text-green-300 text-sm">
-                      <strong>Recording in progress...</strong> Answer naturally. Click
-                      &quot;Next Question&quot; to finish early or wait for the timer to run out.
-                    </p>
-                  </div>
-                  <div className="flex space-x-3">
-                    <GlassButton
-                      onClick={handleNextQuestion}
-                      variant="primary"
-                      className="flex-1 flex items-center justify-center space-x-2"
-                      disabled={loading}
-                    >
-                      {currentQuestionIndex + 1 < questions.length ? (
-                        <>
-                          <SkipForward className="w-5 h-5" />
-                          <span>Next Question</span>
-                        </>
-                      ) : (
-                        <>
-                          <CheckCircle className="w-5 h-5" />
-                          <span>Finish Interview</span>
-                        </>
-                      )}
-                    </GlassButton>
-                  </div>
-                </motion.div>
+                <div className="mt-auto flex flex-col gap-base">
+                  <p className="text-body-md text-body">
+                    Recording. Move on whenever you&rsquo;re done, or let the timer run out.
+                  </p>
+                  <Button size="lg" onClick={handleNextQuestion} disabled={loading}>
+                    {loading ? (
+                      <Spinner className="size-4 border-white/40 border-t-white" />
+                    ) : isLastQuestion ? (
+                      <CheckCircle />
+                    ) : (
+                      <SkipForward />
+                    )}
+                    {isLastQuestion ? "Finish interview" : "Next question"}
+                  </Button>
+                </div>
               )}
-            </GlassCard>
-          </motion.div>
+            </Card>
+          </div>
         </div>
-      </motion.div>
+      </div>
     </div>
   )
 }
