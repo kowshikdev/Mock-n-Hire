@@ -1,4 +1,5 @@
 from student.models.schemas import QuestionReport, FinalReportResponse, UserSummaryResponse, SessionStats
+from student.config.settings import settings
 from typing import List, Dict
 from datetime import datetime
 import logging
@@ -156,7 +157,7 @@ Focus on stress management or answer quality based on their performance.
                         {"role": "system", "content": "You are a helpful AI assistant that summarizes interview performance."},
                         {"role": "user", "content": summary_prompt}
                     ],
-                    model="llama3-8b-8192",
+                    model=settings.LLM_MODEL,
                     max_tokens=150,
                     temperature=0.7
                 )
@@ -173,7 +174,7 @@ Focus on stress management or answer quality based on their performance.
                         {"role": "system", "content": "You are a helpful AI assistant that provides interview recommendations."},
                         {"role": "user", "content": recommendation_prompt}
                     ],
-                    model="llama3-8b-8192",
+                    model=settings.LLM_MODEL,
                     max_tokens=150,
                     temperature=0.7
                 )
