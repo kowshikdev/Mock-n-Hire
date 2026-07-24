@@ -4,7 +4,7 @@ import re
 
 class GroqService:
     def __init__(self):
-        self.client = Groq(api_key=settings.GROQ_API_KEY)
+        self.client = Groq(api_key=settings.LLM_API_KEY)
 
     def generate_interview_questions(self, resume_text: str) -> list:
         """Generate interview questions based on resume text."""

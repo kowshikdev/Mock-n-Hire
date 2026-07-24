@@ -14,7 +14,7 @@ from storage_utils import upload_resume_info_to_db
 
 
 load_dotenv()
-GROQ_API_KEY = os.getenv("OPENAI_API_KEY")
+GROQ_API_KEY = os.getenv("LLM_API_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
