@@ -12,8 +12,11 @@ export const APIStudent = async (
     path: string,
     opts: RequestInit & { headers?: Record<string, string> } = {},
   ) => {
-    // Student FastAPI runs on localhost:8001
-    const url = `http://localhost:8001${path}`;
+    // Student routes are merged into the same backend service as the
+    // recruiter routes (see api/api_service.py) -- same base URL as
+    // lib/api.ts, not a separate :8001 process anymore.
+    const base = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
+    const url = `${base}${path}`;
 
     const { data: { session } } = await supabase.auth.getSession();
     const token = session?.access_token;

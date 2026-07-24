@@ -9,6 +9,7 @@ import { toast } from "sonner";
 
 import type { Session } from "@supabase/supabase-js";
 import { supabase } from "@/lib/supabase";
+import { API } from "@/lib/api";
 
 import { GlassButton } from "@/components/ui/glass-button";
 import { GlassCard } from "@/components/ui/glass-card";
@@ -103,7 +104,7 @@ export function NewScreeningModal({ open, onClose }: Props) {
         return;
       }
 
-      const res = await fetch("http://localhost:4000/upload-resumes/", {
+      const res = await API("/upload-resumes/", {
         method: "POST",
         headers: {
           Authorization: `Bearer ${token}`,

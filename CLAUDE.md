@@ -70,7 +70,17 @@ for transcription.
   backends were merged into one service entirely (see Layout above). CORS
   origins are now read from `ALLOWED_ORIGINS` (comma-separated) instead of a
   hardcoded `localhost:3000` — set it on Railway to the real deployed
-  frontend origin. (#21, follow-up merge PR)
+  frontend origin. `opencv-python` (needs GUI system libs Railway's image
+  lacks) swapped for `opencv-python-headless`. Both the recruiter and
+  student LLM env vars consolidated into one `LLM_API_KEY` (was
+  `OPENAI_API_KEY`/`GROQ_API_KEY` for the same underlying Groq key, read by
+  two different SDKs). (#21–#24)
+- **Frontend API base URL was hardcoded to `localhost`:** `lib/api.ts`,
+  `lib/apiStudent.ts`, and two component call sites pointed at
+  `localhost:4000`/`:8001` unconditionally — every backend call from the
+  deployed frontend was silently broken regardless of backend health. Now
+  reads `NEXT_PUBLIC_API_URL` (falls back to `localhost:4000` for local dev
+  only). **Must be set in Vercel** to the Railway backend's public URL.
 
 ## Known issues still open
 
