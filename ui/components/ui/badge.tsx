@@ -1,35 +1,49 @@
 import * as React from 'react';
 import { cva, type VariantProps } from 'class-variance-authority';
-
 import { cn } from '@/lib/utils';
 
+/**
+ * DESIGN.md `badge-pill`: surface-strong plate, uppercase 12/600 caption
+ * with wide tracking, pill radius.
+ *
+ * Status variants keep the same plate geometry and carry meaning through a
+ * small colored dot rather than a saturated fill -- a wash of green/red
+ * pills would fight the system's "no saturated brand color" rule.
+ */
 const badgeVariants = cva(
-  'inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2',
+  'inline-flex items-center gap-1.5 rounded-pill px-2.5 py-1 text-caption-upper uppercase whitespace-nowrap',
   {
     variants: {
       variant: {
-        default:
-          'border-transparent bg-primary text-primary-foreground hover:bg-primary/80',
-        secondary:
-          'border-transparent bg-secondary text-secondary-foreground hover:bg-secondary/80',
-        destructive:
-          'border-transparent bg-destructive text-destructive-foreground hover:bg-destructive/80',
-        outline: 'text-foreground',
+        default: 'bg-surface-strong text-ink',
+        outline: 'border border-hairline-strong bg-transparent text-body',
+        dark: 'bg-surface-dark text-on-dark',
+        success: 'bg-surface-strong text-ink',
+        error: 'bg-surface-strong text-ink',
+        pending: 'bg-surface-strong text-muted',
       },
     },
-    defaultVariants: {
-      variant: 'default',
-    },
+    defaultVariants: { variant: 'default' },
   }
 );
 
+const dotColor: Record<string, string> = {
+  success: 'bg-success',
+  error: 'bg-error',
+  pending: 'bg-muted-soft',
+};
+
 export interface BadgeProps
-  extends React.HTMLAttributes<HTMLDivElement>,
+  extends React.HTMLAttributes<HTMLSpanElement>,
     VariantProps<typeof badgeVariants> {}
 
-function Badge({ className, variant, ...props }: BadgeProps) {
+function Badge({ className, variant, children, ...props }: BadgeProps) {
+  const dot = variant ? dotColor[variant] : undefined;
   return (
-    <div className={cn(badgeVariants({ variant }), className)} {...props} />
+    <span className={cn(badgeVariants({ variant }), className)} {...props}>
+      {dot && <span className={cn('size-1.5 rounded-pill', dot)} aria-hidden="true" />}
+      {children}
+    </span>
   );
 }
 

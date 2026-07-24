@@ -1,423 +1,314 @@
 "use client"
 
-import { EnhancedGlassButton } from "@/components/ui/enhanced-glass-button"
-import { EnhancedGlassCard } from "@/components/ui/enhanced-glass-card"
-import { EnhancedGlassInput } from "@/components/ui/enhanced-glass-input"
-import { ThemeToggle } from "@/components/ui/theme-toggle"
+import { Suspense, useState } from "react"
+import { useRouter, useSearchParams } from "next/navigation"
+import Link from "next/link"
+import { ArrowLeft, Github, GraduationCap, Users } from "lucide-react"
+import { toast } from "sonner"
+
 import { useAppStore } from "@/lib/store"
 import { signIn, signUp, signInWithGoogle, signInWithGithub } from "@/lib/auth"
-import { motion, AnimatePresence } from "framer-motion"
-import { Brain, Chrome, Github, Users, GraduationCap, Mail, Lock, User, ArrowLeft } from "lucide-react"
-import { useRouter } from "next/navigation"
-import { useState } from "react"
-import { toast } from "sonner"
-import Link from "next/link"
+import { cn } from "@/lib/utils"
+import { Button } from "@/components/ui/button"
+import { Card } from "@/components/ui/card"
+import { Field, Input } from "@/components/ui/input"
+import { Spinner } from "@/components/ui/states"
+import { OrbField } from "@/components/ui/orb"
+import { Wordmark } from "@/components/layout/wordmark"
 
-export default function AuthPage() {
-  const [isSignup, setIsSignup] = useState(false)
-  const [role, setRole] = useState<'recruiter' | 'student'>('recruiter')
-  const [isLoading, setIsLoading] = useState(false)
-  const [formData, setFormData] = useState({
-    email: '',
-    password: '',
-    name: '',
-    confirmPassword: ''
-  })
-  const [errors, setErrors] = useState<Record<string, string>>({})
-  
-  const { setUser } = useAppStore()
+type Role = "recruiter" | "student"
+
+/** Google's mark. lucide's `Chrome` icon is a browser logo, not a Google logo. */
+function GoogleMark() {
+  return (
+    <svg viewBox="0 0 24 24" className="size-4" aria-hidden="true">
+      <path fill="#4285F4" d="M23.06 12.25c0-.85-.08-1.67-.22-2.45H12v4.63h6.2a5.3 5.3 0 0 1-2.3 3.48v2.9h3.72c2.17-2 3.44-4.95 3.44-8.56Z" />
+      <path fill="#34A853" d="M12 23.5c3.11 0 5.72-1.03 7.62-2.79l-3.72-2.89c-1.03.69-2.35 1.1-3.9 1.1-3 0-5.54-2.03-6.45-4.75H1.7v2.98A11.5 11.5 0 0 0 12 23.5Z" />
+      <path fill="#FBBC05" d="M5.55 14.17a6.9 6.9 0 0 1 0-4.34V6.85H1.7a11.5 11.5 0 0 0 0 10.3l3.85-2.98Z" />
+      <path fill="#EA4335" d="M12 4.75c1.69 0 3.21.58 4.4 1.72l3.3-3.3C17.72 1.31 15.11.25 12 .25A11.5 11.5 0 0 0 1.7 6.85l3.85 2.98C6.46 7.11 9 4.75 12 4.75Z" />
+    </svg>
+  )
+}
+
+function AuthForm() {
+  const searchParams = useSearchParams()
   const router = useRouter()
+  const { setUser } = useAppStore()
 
-  const validateForm = () => {
-    const newErrors: Record<string, string> = {}
+  const [isSignup, setIsSignup] = useState(searchParams.get("mode") === "signup")
+  const [role, setRole] = useState<Role>("student")
+  const [isLoading, setIsLoading] = useState(false)
+  const [pendingProvider, setPendingProvider] = useState<"google" | "github" | null>(null)
+  const [form, setForm] = useState({ email: "", password: "", name: "", confirmPassword: "" })
+  const [errors, setErrors] = useState<Record<string, string>>({})
 
-    if (!formData.email) {
-      newErrors.email = 'Email is required'
-    } else if (!/\S+@\S+\.\S+/.test(formData.email)) {
-      newErrors.email = 'Please enter a valid email'
-    }
+  const set = (key: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement>) => {
+    setForm((f) => ({ ...f, [key]: e.target.value }))
+    setErrors((prev) => (prev[key] ? { ...prev, [key]: "" } : prev))
+  }
 
-    if (!formData.password) {
-      newErrors.password = 'Password is required'
-    } else if (formData.password.length < 6) {
-      newErrors.password = 'Password must be at least 6 characters'
-    }
+  const validate = () => {
+    const next: Record<string, string> = {}
+    if (!form.email) next.email = "Email is required"
+    else if (!/\S+@\S+\.\S+/.test(form.email)) next.email = "Enter a valid email address"
+
+    if (!form.password) next.password = "Password is required"
+    else if (form.password.length < 6) next.password = "Use at least 6 characters"
 
     if (isSignup) {
-      if (!formData.name) {
-        newErrors.name = 'Name is required'
-      }
-      if (formData.password !== formData.confirmPassword) {
-        newErrors.confirmPassword = "Passwords don't match"
-      }
+      if (!form.name) next.name = "Name is required"
+      if (form.password !== form.confirmPassword) next.confirmPassword = "Passwords don't match"
     }
 
-    setErrors(newErrors)
-    return Object.keys(newErrors).length === 0
+    setErrors(next)
+    return Object.keys(next).length === 0
   }
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    
-    if (!validateForm()) return
-    
+    if (!validate()) return
     setIsLoading(true)
-    
+
     try {
-      if (isSignup) {
-        const { data, error } = await signUp(formData.email, formData.password, formData.name, role)
-        
-        if (error) {
-          console.error('Signup error:', error)
-          toast.error('Failed to create account')
-          return
-        }
+      const result = isSignup
+        ? await signUp(form.email, form.password, form.name, role)
+        : await signIn(form.email, form.password)
 
-        if (data?.user && data.profile) {
-          setUser({
-            id: data.profile.user_id,
-            email: data.profile.email,
-            name: data.profile.name,
-            role: data.profile.role
-          })
-          
-          toast.success('Account created successfully!')
-          
-          await new Promise(resolve => setTimeout(resolve, 1000))
-          router.push(`/dashboard/${data.profile.role}`)
-        }
-      } else {
-        const { data, error } = await signIn(formData.email, formData.password)
-        
-        if (error) {
-          console.error('Sign in error:', error)
-          toast.error('Invalid email or password')
-          return
-        }
-
-        if (data?.user && data.profile) {
-          setUser({
-            id: data.profile.user_id,
-            email: data.profile.email,
-            name: data.profile.name,
-            role: data.profile.role
-          })
-          
-          toast.success('Welcome back!')
-          router.push(`/dashboard/${data.profile.role}`)
-        }
+      if (result.error) {
+        toast.error(
+          isSignup
+            ? "Could not create that account. The email may already be registered."
+            : "Invalid email or password."
+        )
+        return
       }
-    } catch (error) {
-      console.error('Auth error:', error)
-      toast.error('Something went wrong')
+
+      const profile = result.data?.profile
+      if (!profile) {
+        // signUp succeeds but returns no profile when email confirmation is
+        // enabled on the Supabase project -- the row is created, but there
+        // is no session yet. Telling the user to check their inbox is the
+        // correct outcome here, not an error.
+        toast.success(
+          isSignup ? "Account created. Check your email to confirm it." : "Signed in."
+        )
+        return
+      }
+
+      setUser({
+        id: profile.user_id,
+        email: profile.email,
+        name: profile.name,
+        role: profile.role,
+      })
+      toast.success(isSignup ? "Account created." : "Welcome back.")
+      router.push(`/dashboard/${profile.role}`)
+    } catch {
+      toast.error("Something went wrong. Please try again.")
     } finally {
       setIsLoading(false)
     }
   }
 
-  const handleGoogleAuth = async () => {
-    setIsLoading(true)
-
+  const handleOAuth = async (provider: "google" | "github") => {
+    setPendingProvider(provider)
     try {
-      const { error } = await signInWithGoogle()
-
+      const { error } =
+        provider === "google" ? await signInWithGoogle() : await signInWithGithub()
       if (error) {
-        const message = error instanceof Error ? error.message : 'Failed to sign in with Google'
-        toast.error(message)
+        toast.error(`Could not sign in with ${provider === "google" ? "Google" : "GitHub"}.`)
+        setPendingProvider(null)
       }
-    } catch (error) {
-      console.error('Google auth error:', error)
-      toast.error('Something went wrong')
-    } finally {
-      setIsLoading(false)
+      // On success the browser navigates away to the provider, so the
+      // pending state is intentionally left set.
+    } catch {
+      toast.error("Something went wrong. Please try again.")
+      setPendingProvider(null)
     }
   }
 
-  const handleGithubAuth = async () => {
-    setIsLoading(true)
-
-    try {
-      const { error } = await signInWithGithub()
-
-      if (error) {
-        const message = error instanceof Error ? error.message : 'Failed to sign in with GitHub'
-        toast.error(message)
-      }
-    } catch (error) {
-      console.error('GitHub auth error:', error)
-      toast.error('Something went wrong')
-    } finally {
-      setIsLoading(false)
-    }
-  }
+  const busy = isLoading || pendingProvider !== null
 
   return (
-    <div className="min-h-screen flex items-center justify-center container-padding py-8">
-      {/* Background Effects */}
-      <div className="absolute inset-0 overflow-hidden">
-        <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-primary/10 rounded-full blur-3xl" />
-        <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-secondary/10 rounded-full blur-3xl" />
-      </div>
+    <div className="relative flex min-h-[calc(100vh-4rem)] items-center overflow-hidden py-xxl">
+      <OrbField variant="corner" />
 
-      {/* Navigation */}
-      <div className="absolute top-4 left-4 right-4 flex items-center justify-between z-10">
-        <Link href="/" className="flex items-center space-x-2 focus-ring rounded-lg p-2">
-          <ArrowLeft className="w-5 h-5 text-muted-foreground" />
-          <span className="text-muted-foreground">Back to home</span>
-        </Link>
-        <ThemeToggle />
-      </div>
+      <div className="container-content">
+        <div className="mx-auto w-full max-w-md">
+          <Link
+            href="/"
+            className="mb-lg inline-flex items-center gap-xs text-caption text-muted transition-colors hover:text-ink"
+          >
+            <ArrowLeft className="size-4" />
+            Back to home
+          </Link>
 
-      <motion.div
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        className="w-full max-w-md relative z-10"
-      >
-        <EnhancedGlassCard size="lg" className="space-y-8">
-          {/* Header */}
-          <div className="text-center space-y-4">
-            <motion.div 
-              className="w-16 h-16 mx-auto rounded-xl gradient-bg flex items-center justify-center"
-              whileHover={{ scale: 1.05 }}
-              transition={{ type: "spring", stiffness: 400, damping: 10 }}
-            >
-              <Brain className="w-8 h-8 text-white" />
-            </motion.div>
-            <div>
-              <h1 className="text-2xl font-bold text-foreground">Mock'n-Hire</h1>
-              <p className="text-muted-foreground">
-                {isSignup ? 'Create your account' : 'Welcome back'}
+          <Card variant="panel" className="flex flex-col gap-lg">
+            <div className="flex flex-col gap-xs">
+              <Wordmark />
+              <h1 className="font-display text-display-sm text-ink md:text-display-md">
+                {isSignup ? "Create your account" : "Sign in"}
+              </h1>
+              <p className="text-body-md text-body">
+                {isSignup
+                  ? "Practise interviews built from your resume, or screen candidates for a role."
+                  : "Welcome back to Mock'n-Hire."}
               </p>
             </div>
-          </div>
 
-          {/* Auth Toggle */}
-          <div className="flex p-1 rounded-lg bg-accent/30">
-            <motion.button
-              type="button"
-              onClick={() => {
-                setIsSignup(false)
-                setErrors({})
-              }}
-              className={`flex-1 py-2 px-4 rounded-md text-sm font-medium transition-all focus-ring ${
-                !isSignup 
-                  ? 'bg-background text-foreground shadow-sm' 
-                  : 'text-muted-foreground hover:text-foreground'
-              }`}
-              whileHover={{ scale: !isSignup ? 1 : 1.02 }}
-              whileTap={{ scale: 0.98 }}
-            >
-              Sign In
-            </motion.button>
-            <motion.button
-              type="button"
-              onClick={() => {
-                setIsSignup(true)
-                setErrors({})
-              }}
-              className={`flex-1 py-2 px-4 rounded-md text-sm font-medium transition-all focus-ring ${
-                isSignup 
-                  ? 'bg-background text-foreground shadow-sm' 
-                  : 'text-muted-foreground hover:text-foreground'
-              }`}
-              whileHover={{ scale: isSignup ? 1 : 1.02 }}
-              whileTap={{ scale: 0.98 }}
-            >
-              Sign Up
-            </motion.button>
-          </div>
-
-          {/* Role Selection */}
-          <AnimatePresence mode="wait">
-            {isSignup && (
-              <motion.div
-                initial={{ opacity: 0, height: 0 }}
-                animate={{ opacity: 1, height: 'auto' }}
-                exit={{ opacity: 0, height: 0 }}
-                transition={{ duration: 0.3 }}
-                className="space-y-4"
+            {/* OAuth */}
+            <div className="grid grid-cols-2 gap-sm">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => handleOAuth("google")}
+                disabled={busy}
               >
-                <label className="block text-sm font-medium text-foreground">
-                  I am a...
-                </label>
-                <div className="grid grid-cols-2 gap-3">
-                  <motion.button
-                    type="button"
-                    onClick={() => setRole('recruiter')}
-                    className={`p-4 rounded-lg border transition-all focus-ring ${
-                      role === 'recruiter'
-                        ? 'border-primary/50 bg-primary/10'
-                        : 'border-border bg-accent/30 hover:bg-accent/50'
-                    }`}
-                    whileHover={{ scale: 1.02 }}
-                    whileTap={{ scale: 0.98 }}
-                  >
-                    <Users className="w-6 h-6 mx-auto mb-2 text-primary" />
-                    <div className="text-sm font-medium text-foreground">Recruiter</div>
-                    <div className="text-xs text-muted-foreground">Hire talent</div>
-                  </motion.button>
-                  <motion.button
-                    type="button"
-                    onClick={() => setRole('student')}
-                    className={`p-4 rounded-lg border transition-all focus-ring ${
-                      role === 'student'
-                        ? 'border-primary/50 bg-primary/10'
-                        : 'border-border bg-accent/30 hover:bg-accent/50'
-                    }`}
-                    whileHover={{ scale: 1.02 }}
-                    whileTap={{ scale: 0.98 }}
-                  >
-                    <GraduationCap className="w-6 h-6 mx-auto mb-2 text-primary" />
-                    <div className="text-sm font-medium text-foreground">Student</div>
-                    <div className="text-xs text-muted-foreground">Practice interviews</div>
-                  </motion.button>
-                </div>
-              </motion.div>
-            )}
-          </AnimatePresence>
+                {pendingProvider === "google" ? <Spinner className="size-4" /> : <GoogleMark />}
+                Google
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => handleOAuth("github")}
+                disabled={busy}
+              >
+                {pendingProvider === "github" ? <Spinner className="size-4" /> : <Github />}
+                GitHub
+              </Button>
+            </div>
 
-          {/* Form */}
-          <form onSubmit={handleSubmit} className="space-y-6">
-            <AnimatePresence mode="wait">
+            <div className="flex items-center gap-sm">
+              <span className="h-px flex-1 bg-hairline" />
+              <span className="text-caption text-muted">or</span>
+              <span className="h-px flex-1 bg-hairline" />
+            </div>
+
+            <form onSubmit={handleSubmit} className="flex flex-col gap-base" noValidate>
               {isSignup && (
-                <motion.div
-                  initial={{ opacity: 0, y: -20 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -20 }}
-                  transition={{ duration: 0.3 }}
-                >
-                  <EnhancedGlassInput
-                    label="Full Name"
-                    type="text"
-                    placeholder="Enter your full name"
-                    value={formData.name}
-                    onChange={(e) => setFormData({...formData, name: e.target.value})}
-                    error={errors.name}
-                    icon={<User className="w-4 h-4" />}
-                    required
-                  />
-                </motion.div>
+                <fieldset className="flex flex-col gap-xs">
+                  <legend className="mb-xs block text-body-strong text-ink">
+                    I&rsquo;m joining as
+                  </legend>
+                  <div className="grid grid-cols-2 gap-sm">
+                    {(
+                      [
+                        { value: "student", label: "Candidate", Icon: GraduationCap },
+                        { value: "recruiter", label: "Recruiter", Icon: Users },
+                      ] as const
+                    ).map(({ value, label, Icon }) => (
+                      <button
+                        key={value}
+                        type="button"
+                        onClick={() => setRole(value)}
+                        aria-pressed={role === value}
+                        className={cn(
+                          "flex flex-col items-center gap-xs rounded-lg border p-base transition-colors",
+                          role === value
+                            ? "border-ink bg-surface-strong text-ink"
+                            : "border-hairline-strong text-body hover:border-ink"
+                        )}
+                      >
+                        <Icon className="size-5" />
+                        <span className="text-caption">{label}</span>
+                      </button>
+                    ))}
+                  </div>
+                </fieldset>
               )}
-            </AnimatePresence>
-            
-            <EnhancedGlassInput
-              label="Email Address"
-              type="email"
-              placeholder="Enter your email"
-              value={formData.email}
-              onChange={(e) => setFormData({...formData, email: e.target.value})}
-              error={errors.email}
-              icon={<Mail className="w-4 h-4" />}
-              required
-            />
-            
-            <EnhancedGlassInput
-              label="Password"
-              type="password"
-              placeholder="Enter your password"
-              value={formData.password}
-              onChange={(e) => setFormData({...formData, password: e.target.value})}
-              error={errors.password}
-              icon={<Lock className="w-4 h-4" />}
-              hint={isSignup ? "Must be at least 6 characters" : undefined}
-              required
-            />
 
-            <AnimatePresence mode="wait">
               {isSignup && (
-                <motion.div
-                  initial={{ opacity: 0, y: -20 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -20 }}
-                  transition={{ duration: 0.3 }}
+                <Field label="Full name" htmlFor="name" error={errors.name}>
+                  <Input
+                    id="name"
+                    autoComplete="name"
+                    value={form.name}
+                    onChange={set("name")}
+                    invalid={!!errors.name}
+                    placeholder="Your name"
+                  />
+                </Field>
+              )}
+
+              <Field label="Email" htmlFor="email" error={errors.email}>
+                <Input
+                  id="email"
+                  type="email"
+                  autoComplete="email"
+                  value={form.email}
+                  onChange={set("email")}
+                  invalid={!!errors.email}
+                  placeholder="you@example.com"
+                />
+              </Field>
+
+              <Field label="Password" htmlFor="password" error={errors.password}>
+                <Input
+                  id="password"
+                  type="password"
+                  autoComplete={isSignup ? "new-password" : "current-password"}
+                  value={form.password}
+                  onChange={set("password")}
+                  invalid={!!errors.password}
+                  placeholder={isSignup ? "At least 6 characters" : "Your password"}
+                />
+              </Field>
+
+              {isSignup && (
+                <Field
+                  label="Confirm password"
+                  htmlFor="confirmPassword"
+                  error={errors.confirmPassword}
                 >
-                  <EnhancedGlassInput
-                    label="Confirm Password"
+                  <Input
+                    id="confirmPassword"
                     type="password"
-                    placeholder="Confirm your password"
-                    value={formData.confirmPassword}
-                    onChange={(e) => setFormData({...formData, confirmPassword: e.target.value})}
-                    error={errors.confirmPassword}
-                    icon={<Lock className="w-4 h-4" />}
-                    required
+                    autoComplete="new-password"
+                    value={form.confirmPassword}
+                    onChange={set("confirmPassword")}
+                    invalid={!!errors.confirmPassword}
+                    placeholder="Re-enter your password"
                   />
-                </motion.div>
+                </Field>
               )}
-            </AnimatePresence>
 
-            <EnhancedGlassButton
-              type="submit"
-              variant="primary"
-              fullWidth
-              loading={isLoading}
-              size="lg"
-            >
-              {isSignup ? 'Create Account' : 'Sign In'}
-            </EnhancedGlassButton>
-          </form>
+              <Button type="submit" size="lg" disabled={busy} className="mt-xs">
+                {isLoading && <Spinner className="size-4 border-white/40 border-t-white" />}
+                {isSignup ? "Create account" : "Sign in"}
+              </Button>
+            </form>
 
-          {/* Divider */}
-          <div className="relative">
-            <div className="absolute inset-0 flex items-center">
-              <div className="w-full border-t border-border" />
-            </div>
-            <div className="relative flex justify-center text-sm">
-              <span className="px-4 bg-card text-muted-foreground">or continue with</span>
-            </div>
-          </div>
-
-          {/* OAuth providers */}
-          <div className="grid grid-cols-2 gap-3">
-            <EnhancedGlassButton
-              type="button"
-              onClick={handleGoogleAuth}
-              fullWidth
-              loading={isLoading}
-              icon={<Chrome className="w-5 h-5" />}
-              size="lg"
-            >
-              Google
-            </EnhancedGlassButton>
-            <EnhancedGlassButton
-              type="button"
-              onClick={handleGithubAuth}
-              fullWidth
-              loading={isLoading}
-              icon={<Github className="w-5 h-5" />}
-              size="lg"
-            >
-              GitHub
-            </EnhancedGlassButton>
-          </div>
-
-          {/* Footer */}
-          <div className="text-center text-sm text-muted-foreground">
-            {isSignup ? (
-              <>
-                Already have an account?{' '}
-                <button
-                  type="button"
-                  onClick={() => setIsSignup(false)}
-                  className="text-primary hover:underline focus-ring rounded"
-                >
-                  Sign in
-                </button>
-              </>
-            ) : (
-              <>
-                Don't have an account?{' '}
-                <button
-                  type="button"
-                  onClick={() => setIsSignup(true)}
-                  className="text-primary hover:underline focus-ring rounded"
-                >
-                  Sign up
-                </button>
-              </>
-            )}
-          </div>
-        </EnhancedGlassCard>
-      </motion.div>
+            <p className="text-center text-caption text-body">
+              {isSignup ? "Already have an account?" : "New to Mock'n-Hire?"}{" "}
+              <button
+                type="button"
+                onClick={() => {
+                  setIsSignup((s) => !s)
+                  setErrors({})
+                }}
+                className="text-ink underline underline-offset-4"
+              >
+                {isSignup ? "Sign in" : "Create one"}
+              </button>
+            </p>
+          </Card>
+        </div>
+      </div>
     </div>
+  )
+}
+
+export default function AuthPage() {
+  // useSearchParams needs a Suspense boundary for this route to prerender.
+  return (
+    <Suspense
+      fallback={
+        <div className="flex min-h-[calc(100vh-4rem)] items-center justify-center">
+          <Spinner />
+        </div>
+      }
+    >
+      <AuthForm />
+    </Suspense>
   )
 }
