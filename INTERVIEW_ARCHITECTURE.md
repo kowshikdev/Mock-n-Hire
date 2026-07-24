@@ -165,7 +165,22 @@ So there are two model env vars:
 
 - `LLM_MODEL` — fast per-turn work (evaluation, question phrasing). Default
   `llama-3.1-8b-instant`.
-- `AGENT_MODEL` — the prep agent only. Needs strong tool calling.
+- `AGENT_MODEL` — the prep agent only. Needs strong tool calling. Default
+  `openai/gpt-oss-120b`.
+
+**Decision: stay on Groq, accept the risk.** No Groq model appears on
+LangChain's deepagents eval table, so the prep agent's planning quality is
+genuinely unverified — `gemini-3.5-flash` sits at 82% overall / 90% tool use
+there and would be the safer pick. Staying single-provider was chosen anyway
+to keep one key and one billing surface. `openai/gpt-oss-120b` is the
+strongest tool-caller Groq currently serves (Kimi K2 is *not* in their
+catalog, despite being the open-weight family LangChain recommends).
+
+This is exactly why prep failure has to be survivable. If the agent turns out
+to plan badly on this model, the visible effect is more sessions falling back
+to resume-only grounding — not broken interviews. If that rate is high,
+switching `AGENT_MODEL` to a Gemini or Anthropic string is a one-line change,
+since both integrations are already hard dependencies of deepagents.
 
 Both are env vars for the same reason `LLM_MODEL` already is: Groq
 decommissioned `llama3-8b-8192` out from under this codebase once already.
