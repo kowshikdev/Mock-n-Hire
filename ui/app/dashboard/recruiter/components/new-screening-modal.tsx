@@ -169,9 +169,9 @@ export function NewScreeningModal({ open, onClose }: Props) {
             onClick={onClose}
             disabled={loading}
             aria-label="Close"
-            className="flex size-9 shrink-0 items-center justify-center rounded-pill text-muted transition-colors hover:bg-surface-strong hover:text-ink disabled:opacity-40"
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-pill text-muted transition-colors hover:bg-surface-strong hover:text-ink disabled:opacity-40"
           >
-            <X className="size-4" />
+            <X className="h-4 w-4" />
           </button>
         </div>
 
@@ -235,7 +235,7 @@ export function NewScreeningModal({ open, onClose }: Props) {
             {file ? (
               <div className="flex items-center justify-between gap-base rounded-lg border border-hairline-strong bg-canvas-soft p-base">
                 <div className="flex min-w-0 items-center gap-sm">
-                  <FileArchive className="size-5 shrink-0 text-ink" />
+                  <FileArchive className="h-5 w-5 shrink-0 text-ink" />
                   <div className="flex min-w-0 flex-col">
                     <span className="truncate text-body-strong text-ink">{file.name}</span>
                     <span className="text-caption text-muted">
@@ -266,7 +266,7 @@ export function NewScreeningModal({ open, onClose }: Props) {
                 )}
               >
                 <input {...getInputProps()} />
-                <UploadCloud className="size-6 text-muted" />
+                <UploadCloud className="h-6 w-6 text-muted" />
                 <span className="text-body-strong text-ink">
                   {isDragActive ? "Drop the archive here" : "Drop a .zip of resumes"}
                 </span>
@@ -282,7 +282,7 @@ export function NewScreeningModal({ open, onClose }: Props) {
               Cancel
             </Button>
             <Button type="submit" disabled={loading}>
-              {loading && <Spinner className="size-4 border-white/40 border-t-white" />}
+              {loading && <Spinner className="h-4 w-4 border-white/40 border-t-white" />}
               {loading ? "Uploading…" : "Start screening"}
             </Button>
           </div>

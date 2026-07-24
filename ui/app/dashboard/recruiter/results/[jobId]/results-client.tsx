@@ -209,7 +209,7 @@ export default function ResultsPageClient({ jobId }: { jobId: string }) {
             href="/dashboard/recruiter"
             className="inline-flex w-fit items-center gap-xs text-caption text-muted transition-colors hover:text-ink"
           >
-            <ArrowLeft className="size-4" />
+            <ArrowLeft className="h-4 w-4" />
             All screenings
           </Link>
           <div className="flex flex-col gap-xxs">
@@ -254,7 +254,7 @@ export default function ResultsPageClient({ jobId }: { jobId: string }) {
                     )}
                   >
                     <div className="flex min-w-0 items-center gap-sm">
-                      <span className="flex size-8 shrink-0 items-center justify-center rounded-pill bg-surface-strong text-caption text-ink">
+                      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-pill bg-surface-strong text-caption text-ink">
                         {c.rank}
                       </span>
                       <div className="flex min-w-0 flex-col">
@@ -351,17 +351,17 @@ export default function ResultsPageClient({ jobId }: { jobId: string }) {
                 </Card>
 
                 <Evidence
-                  icon={<Code className="size-4" />}
+                  icon={<Code className="h-4 w-4" />}
                   title="Skills"
                   items={toList(selected.key_skills)}
                 />
                 <Evidence
-                  icon={<Briefcase className="size-4" />}
+                  icon={<Briefcase className="h-4 w-4" />}
                   title="Relevant projects"
                   items={toList(selected.relevant_projects)}
                 />
                 <Evidence
-                  icon={<Award className="size-4" />}
+                  icon={<Award className="h-4 w-4" />}
                   title="Certifications"
                   items={toList(selected.certifications_courses)}
                   note="Extracted from the resume. Not currently part of the score."

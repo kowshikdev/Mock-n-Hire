@@ -143,8 +143,8 @@ export default function HomePage() {
           <div className="mt-xxl grid gap-base md:grid-cols-3">
             {CAPABILITIES.map(({ icon: Icon, title, body }) => (
               <Card key={title} variant="feature" interactive className="flex flex-col gap-sm">
-                <span className="flex size-10 items-center justify-center rounded-pill bg-surface-strong text-ink">
-                  <Icon className="size-5" />
+                <span className="flex h-10 w-10 items-center justify-center rounded-pill bg-surface-strong text-ink">
+                  <Icon className="h-5 w-5" />
                 </span>
                 <CardTitle>{title}</CardTitle>
                 <CardDescription>{body}</CardDescription>
@@ -169,8 +169,8 @@ export default function HomePage() {
               {CANDIDATE_STEPS.map(({ icon: Icon, title, body }, i) => (
                 <li key={title}>
                   <Card variant="feature" className="flex items-start gap-base">
-                    <span className="flex size-10 shrink-0 items-center justify-center rounded-pill bg-surface-strong text-ink">
-                      <Icon className="size-5" />
+                    <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-pill bg-surface-strong text-ink">
+                      <Icon className="h-5 w-5" />
                     </span>
                     <div className="flex flex-col gap-xxs">
                       <span className="eyebrow">Step {i + 1}</span>
@@ -196,8 +196,8 @@ export default function HomePage() {
               {RECRUITER_STEPS.map(({ icon: Icon, title, body }, i) => (
                 <li key={title}>
                   <Card variant="feature" className="flex items-start gap-base">
-                    <span className="flex size-10 shrink-0 items-center justify-center rounded-pill bg-surface-strong text-ink">
-                      <Icon className="size-5" />
+                    <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-pill bg-surface-strong text-ink">
+                      <Icon className="h-5 w-5" />
                     </span>
                     <div className="flex flex-col gap-xxs">
                       <span className="eyebrow">Step {i + 1}</span>

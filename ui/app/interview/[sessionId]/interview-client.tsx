@@ -356,7 +356,7 @@ export default function InterviewPageClient({ sessionIdParam }: { sessionIdParam
           <div className="flex items-center gap-base">
             {isRecording && (
               <span className="flex items-center gap-xs text-caption text-error">
-                <span className="size-2 animate-pulse rounded-pill bg-error" />
+                <span className="h-2 w-2 animate-pulse rounded-pill bg-error" />
                 Recording
               </span>
             )}
@@ -383,7 +383,7 @@ export default function InterviewPageClient({ sessionIdParam }: { sessionIdParam
                 <Badge variant="default">{currentQuestion.category}</Badge>
               )}
             </div>
-            <Meter value={progress} aria-label="Interview progress" />
+            <Meter value={progress} ariaLabel="Interview progress" />
           </div>
 
           <div className="grid gap-base lg:grid-cols-3">
@@ -399,7 +399,7 @@ export default function InterviewPageClient({ sessionIdParam }: { sessionIdParam
                 />
                 {!videoEnabled && (
                   <div className="absolute inset-0 flex items-center justify-center">
-                    <VideoOff className="size-8 text-on-dark-soft" />
+                    <VideoOff className="h-8 w-8 text-on-dark-soft" />
                   </div>
                 )}
               </div>
@@ -445,7 +445,7 @@ export default function InterviewPageClient({ sessionIdParam }: { sessionIdParam
                   </p>
                   <Button size="lg" onClick={startAnswering} disabled={loading}>
                     {loading ? (
-                      <Spinner className="size-4 border-white/40 border-t-white" />
+                      <Spinner className="h-4 w-4 border-white/40 border-t-white" />
                     ) : (
                       <Mic />
                     )}
@@ -459,7 +459,7 @@ export default function InterviewPageClient({ sessionIdParam }: { sessionIdParam
                   </p>
                   <Button size="lg" onClick={handleNextQuestion} disabled={loading}>
                     {loading ? (
-                      <Spinner className="size-4 border-white/40 border-t-white" />
+                      <Spinner className="h-4 w-4 border-white/40 border-t-white" />
                     ) : isLastQuestion ? (
                       <CheckCircle />
                     ) : (

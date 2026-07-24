@@ -102,9 +102,9 @@ function FeatureCard() {
                 target="_blank"
                 rel="noopener noreferrer"
                 aria-label={label}
-                className="flex size-9 items-center justify-center rounded-md bg-surface-dark-elevated text-on-dark transition-[background-color,transform] duration-200 hover:-translate-y-0.5 hover:bg-white/15"
+                className="flex h-9 w-9 items-center justify-center rounded-md bg-surface-dark-elevated text-on-dark transition-[background-color,transform] duration-200 hover:-translate-y-0.5 hover:bg-white/15"
               >
-                <Icon className="size-4" />
+                <Icon className="h-4 w-4" />
               </a>
             </li>
           ))}

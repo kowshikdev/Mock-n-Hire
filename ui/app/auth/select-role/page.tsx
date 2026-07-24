@@ -131,8 +131,8 @@ export default function SelectRolePage() {
                   disabled={saving !== null}
                   className="flex w-full flex-col items-start gap-sm text-left disabled:opacity-60"
                 >
-                  <span className="flex size-10 items-center justify-center rounded-pill bg-surface-strong text-ink">
-                    {saving === value ? <Spinner className="size-4" /> : <Icon className="size-5" />}
+                  <span className="flex h-10 w-10 items-center justify-center rounded-pill bg-surface-strong text-ink">
+                    {saving === value ? <Spinner className="h-4 w-4" /> : <Icon className="h-5 w-5" />}
                   </span>
                   <span className="font-sans text-title-md text-ink">{label}</span>
                   <span className="text-body-md text-body">{body}</span>
