@@ -20,6 +20,16 @@ from rank_candidates import compute_relative_ranking
 from routes.collaboration import router as collaboration_router
 from routes.search_analytics import router as search_router
 
+# Candidate/interview backend -- was a separate FastAPI app (student/main.py) on
+# its own Railway service. Merged into this single process/service to halve
+# baseline compute cost; student/* code is untouched otherwise (only its
+# internal imports were switched from flat to `student.`-prefixed absolute
+# imports so it resolves correctly when this file, not student/main.py, is
+# the process root).
+from student.api.routes import interview as student_interview_router
+from student.api.routes import stress as student_stress_router
+from student.api.routes import admin as student_admin_router
+
 # ─── Load & init ─────────────────────────────────────────
 load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -32,9 +42,17 @@ app = FastAPI()
 
 from fastapi.middleware.cors import CORSMiddleware
 
+# ALLOWED_ORIGINS: comma-separated list, e.g.
+# "https://your-app.vercel.app,http://localhost:3000". Defaults to localhost
+# only -- set this on Railway before relying on the deployed frontend being
+# able to call this API (the deployed origin was never added here before).
+_allowed_origins = [
+    o.strip() for o in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",") if o.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],   # or ["*"] for all, but dev only
+    allow_origins=_allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -46,6 +64,13 @@ app.add_middleware(
 # (it sets a Content-Disposition download filename).
 app.include_router(collaboration_router)
 app.include_router(search_router)
+
+# Candidate/interview routes (was student/main.py's separate app) -- prefixes
+# /interview, /stress, /admin already declared on each router, so nothing here
+# collides with the recruiter endpoints above.
+app.include_router(student_interview_router.router)
+app.include_router(student_stress_router.router)
+app.include_router(student_admin_router.router)
 
 # ─── Paths ───────────────────────────────────────────────
 RESUME_FOLDER         = "resumes"

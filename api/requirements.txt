@@ -1,25 +1,30 @@
-# Recruiter backend (resume screening + ranking) -- FastAPI app in api_service.py.
-# Requires Python 3.10+.
+# Single merged backend -- both FastAPI apps (recruiter ranking in
+# api_service.py, candidate/interview routes in student/) now run as one
+# process/one Railway service. Requires Python 3.10+.
 #
-# Cleaned up from the original: removed `python==3.10.11` (not a pip package),
+# Cleaned up from the originals: removed `python==3.10.11` (not a pip package),
 # `langchain`/`faiss-cpu` (imported nowhere), `keras`/`tf-keras`/`tensorflow`
 # (only the never-loaded emotion model used those -- dropped), `jwt` (auth now
 # goes through supabase.auth, not manual JWT decode), the duplicate/wrong
-# `dotenv` package, `zipfile36` (stdlib zipfile is used), and unused
-# google-auth/tqdm/requests entries.
+# `dotenv` package, `zipfile36` (stdlib zipfile is used), unused
+# google-auth/tqdm/requests entries, and (from student/requirements.txt)
+# `moviepy` (imported nowhere).
 
 fastapi
 uvicorn
 python-multipart          # Form() / UploadFile in the upload endpoints
 python-dotenv
 supabase
+pydantic
 
 openai                    # pointed at Groq's OpenAI-compatible endpoint (see process_resumes.py)
-pydantic
+groq                      # native Groq client (see student/core/*_service.py)
 
 pandas
 scikit-learn              # MinMaxScaler in rank_candidates.py
 sentence-transformers     # loaded in process_resumes.py (embedding-based ranking is Phase 1 / #9)
 
-pdfminer.six              # PDF resume text extraction
-python-docx               # DOCX resume text extraction
+pdfminer.six              # PDF resume text extraction (recruiter side)
+python-docx               # DOCX resume text extraction (recruiter side)
+pymupdf                   # PDF resume text extraction (student side, imports as `fitz`)
+opencv-python             # video duration probe in student/api/routes/stress.py

@@ -1,7 +1,7 @@
-from utils.supabase_utils import supabase
-from core.groq_service import GroqService
-from core.whisper_service import WhisperService
-from core.report_service import ReportService
+from student.utils.supabase_utils import supabase
+from student.core.groq_service import GroqService
+from student.core.whisper_service import WhisperService
+from student.core.report_service import ReportService
 from fastapi import Depends
 
 def get_supabase():

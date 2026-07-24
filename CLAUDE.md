@@ -20,9 +20,19 @@ for transcription.
 - `ui/` — Next.js frontend. **Vercel Root Directory must be set to `ui`**,
   not the repo root (that misconfiguration was the original deploy failure).
   Contains `app/`, `components/`, `lib/`, `hooks/`, and all frontend config.
-- `api/` — FastAPI backend. Two apps: `api/api_service.py` (recruiter:
-  resume upload/ranking) and `api/student/main.py` (candidate: interview
-  flow, runs on :8001). Shared Supabase auth in `api/student/api/auth.py`.
+- `api/` — FastAPI backend. **One app, one Railway service.**
+  `api/api_service.py` is the sole entrypoint: recruiter routes (resume
+  upload/ranking) are defined inline, candidate/interview routes
+  (`/interview`, `/stress`, `/admin`) come from `api/student/api/routes/`
+  and are mounted via `app.include_router(...)`. Was two separate FastAPI
+  apps/Railway services (`api/student/main.py` ran standalone on :8001);
+  merged to halve baseline compute cost since traffic doesn't yet justify
+  independent scaling. `api/student/` code still imports via absolute
+  `student.*` paths (e.g. `from student.utils.supabase_utils import ...`)
+  so it resolves correctly with `api/` as the process root — if
+  the interview flow's Whisper/video processing later needs independent
+  scaling, extracting `api/student/` back into its own service just needs a
+  new `railway.json` + root directory, no import rewrite.
 - `assets/` — README screenshots.
 - Root: `README.md`, `CLAUDE.md`, `LICENSE`, `.gitignore`. `supabase/`
   migrations land here (issue #8).
@@ -47,22 +57,31 @@ for transcription.
 ## Fixed already
 
 - **Auth (was a live hole):** `get_current_user` used to skip JWT signature
-  verification entirely; student routes had no auth at all. Now both backends
-  verify via `supabase.auth.get_user()` and enforce resource ownership
+  verification entirely; student routes had no auth at all. Now both route
+  sets verify via `supabase.auth.get_user()` and enforce resource ownership
   (`require_self`/`require_session_owner`/`require_recruiter`). Route
   protection re-enabled via `ui/middleware.ts`. (#7, merged)
 - **Build/deploy:** dynamic routes updated to Next.js 15 async `params`; dead
   duplicate frontends (`ui/`-old, `new_frontend/`, `ui/project/`) deleted;
   framer-motion `onDrag` type conflicts resolved. Verified building in a
   Node-24 Linux container matching Vercel. (#14)
+- **Railway deploy + backend consolidation:** `api/student/main.py` had no
+  entry point at all (Railpack fell back to nothing); fixed, then the two
+  backends were merged into one service entirely (see Layout above). CORS
+  origins are now read from `ALLOWED_ORIGINS` (comma-separated) instead of a
+  hardcoded `localhost:3000` — set it on Railway to the real deployed
+  frontend origin. (#21, follow-up merge PR)
 
 ## Known issues still open
 
-- No tests, no CI (issue #8). No `supabase/migrations/` — schema is only
-  implicit in `.table(...)` calls, and there are no RLS policies (issue #8).
-- `api/student/requirements.txt` was mis-encoded/uninstallable (issue #8).
+- No tests, no CI (issue #8).
 - `OPENAI_API_KEY` must actually hold a **Groq** key (see `process_resumes.py`'s
-  `base_url` trick) — a real footgun; no `.env.example` documents it (issue #8).
+  `base_url` trick) — a real footgun, now documented in `api/.env.example`
+  alongside the separate native `GROQ_API_KEY` the student routes read directly.
+- Pre-existing route collision (not introduced by the merge): `api_service.py`'s
+  own `@app.get("/export")` is unreachable — `routes/search_analytics.py`'s
+  `/export` is registered first via `include_router` and wins. Not fixed here;
+  flagging for issue #8's cleanup pass.
 
 ## Roadmap
 

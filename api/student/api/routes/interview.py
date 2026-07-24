@@ -1,10 +1,10 @@
 from fastapi import APIRouter, HTTPException, Depends, Body, File, UploadFile
 from pydantic import BaseModel
-from api.dependencies import get_supabase, get_groq_service, get_whisper_service, get_report_service
-from api.auth import get_current_user, require_self, require_session_owner
-from utils.supabase_utils import upload_file, download_file
-from utils.pdf_utils import extract_text_from_pdf
-from models.schemas import Question, NextQuestionResponse, FinalReportResponse, UserSummaryResponse
+from student.api.dependencies import get_supabase, get_groq_service, get_whisper_service, get_report_service
+from student.api.auth import get_current_user, require_self, require_session_owner
+from student.utils.supabase_utils import upload_file, download_file
+from student.utils.pdf_utils import extract_text_from_pdf
+from student.models.schemas import Question, NextQuestionResponse, FinalReportResponse, UserSummaryResponse
 import os
 from datetime import datetime
 import logging
