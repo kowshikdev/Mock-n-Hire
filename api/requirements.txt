@@ -24,9 +24,13 @@ pandas
 scikit-learn              # MinMaxScaler in rank_candidates.py
 sentence-transformers     # loaded in process_resumes.py (embedding-based ranking is Phase 1 / #9)
 
-pdfminer.six              # PDF resume text extraction (recruiter side)
-python-docx               # DOCX resume text extraction (recruiter side)
-pymupdf                   # PDF resume text extraction (student side, imports as `fitz`)
+# Resume text extraction, shared by both sides via resume_text.py. pdfminer.six
+# was dropped when the recruiter path moved onto the same extractor: PyMuPDF
+# already handled PDFs on the candidate side and, unlike pdfminer, exposes
+# block geometry, which is what makes reading order recoverable on two-column
+# resumes.
+pymupdf                   # PDF extraction (imports as `fitz`)
+python-docx               # DOCX extraction
 
 # headless, not opencv-python: the full package needs libGL/libxcb etc. that
 # Railway's build image doesn't have (crashed on deploy: "ImportError:

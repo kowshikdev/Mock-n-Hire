@@ -77,7 +77,7 @@ export default function StudentDashboard() {
 
   const onDrop = useCallback((accepted: File[], rejected: unknown[]) => {
     if (rejected.length > 0) {
-      toast.error("Please upload a PDF.")
+      toast.error("Please upload a PDF or DOCX.")
       return
     }
     const file = accepted[0]
@@ -91,11 +91,14 @@ export default function StudentDashboard() {
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
-    // The backend rejects anything that isn't a PDF
-    // (interview.py: "Only PDF files are supported"), so DOC/DOCX are not
-    // offered here -- accepting them only to fail server-side wasted the
-    // user's upload.
-    accept: { "application/pdf": [".pdf"] },
+    // Matches what resume_text.py can actually read. DOCX used to be rejected
+    // by the candidate backend even though the recruiter side had always
+    // accepted it, so anyone whose resume was a Word document was locked out
+    // of practice interviews entirely.
+    accept: {
+      "application/pdf": [".pdf"],
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document": [".docx"],
+    },
     maxFiles: 1,
     disabled: isGenerating,
   })
@@ -201,7 +204,7 @@ export default function StudentDashboard() {
               <span className="text-body-strong text-ink">
                 {isDragActive ? "Drop your resume here" : "Drop your resume"}
               </span>
-              <span className="text-caption text-muted">PDF, up to 10 MB</span>
+              <span className="text-caption text-muted">PDF or DOCX, up to 10 MB</span>
             </div>
           )}
 
