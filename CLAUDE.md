@@ -123,6 +123,26 @@ That's the whole set — it was 61 files before, 45 of them unreachable.
   a *previous* Supabase project's URL, 0-10 scores rendered on 0-100 bars,
   and the `COMPLETE`/`complete` case mismatch that stopped the screening
   redirect from ever firing.
+- **Auth session store mismatch:** `lib/supabase.ts` used the plain
+  `createClient` (localStorage session), while `middleware.ts` reads the
+  session from cookies via `createMiddlewareClient`. The two never saw each
+  other, so every protected route bounced a "signed in" user back to
+  `/auth/login`. Switched to `createClientComponentClient`. Was masked by
+  the `AuthProvider` bug above until that was fixed, then became visible.
+- **`size-*` utilities silently compiled to nothing.** The `size-*`
+  shorthand needs Tailwind >= 3.4; this project is on 3.3.3. 46 occurrences
+  across the revamp were replaced with `h-N w-N`. Don't reach for `size-*`
+  until Tailwind is upgraded.
+- **Storage buckets never existed.** `resumes`, `mock.interview.resumes`,
+  `mock.interview.answers`, `mock.interview.videos` were referenced
+  everywhere in code but never created — every resume/audio/video upload
+  failed with a 404 "Bucket not found". Created via
+  `supabase/migrations/20260724192429_storage_buckets_and_policies.sql`,
+  with `mock.interview.answers`/`videos` further scoped so a user can only
+  upload into their own session's folder
+  (`20260724192552_scope_interview_storage_policies_to_session_owner.sql`) —
+  the frontend uploads audio/video directly from the browser, not through
+  the backend, so this needed real RLS, not just bucket creation.
 
 ## Known issues still open
 
