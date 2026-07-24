@@ -27,4 +27,10 @@ sentence-transformers     # loaded in process_resumes.py (embedding-based rankin
 pdfminer.six              # PDF resume text extraction (recruiter side)
 python-docx               # DOCX resume text extraction (recruiter side)
 pymupdf                   # PDF resume text extraction (student side, imports as `fitz`)
-opencv-python             # video duration probe in student/api/routes/stress.py
+
+# headless, not opencv-python: the full package needs libGL/libxcb etc. that
+# Railway's build image doesn't have (crashed on deploy: "ImportError:
+# libxcb.so.1: cannot open shared object file"). stress.py only calls
+# cv2.VideoCapture for a duration probe, no GUI features -- headless is a
+# drop-in replacement, same `import cv2` namespace, no code changes needed.
+opencv-python-headless    # video duration probe in student/api/routes/stress.py
