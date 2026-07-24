@@ -6,6 +6,7 @@ import { motion } from "framer-motion";
 import { Brain, Clock } from "lucide-react";
 import { GlassCard } from "@/components/ui/glass-card";
 import { Progress } from "@/components/ui/progress";
+import { API } from "@/lib/api";
 
 /* ──────────────────────────────────────────────────────────────── */
 
@@ -36,7 +37,7 @@ function AnimationInner() {
       setStep(s => (pct > 80 ? Math.min(s + 1, 3) : s));
 
       try {
-        const res = await fetch(`http://localhost:4000/status?job_id=${jobId}`);
+        const res = await API(`/status?job_id=${jobId}`);
         const { status } = await res.json();
 
         if (status === "COMPLETE") {
