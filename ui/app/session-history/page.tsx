@@ -148,7 +148,7 @@ export default function SessionHistoryPage() {
             </Card>
 
             <div className="relative max-w-sm">
-              <Search className="pointer-events-none absolute left-sm top-1/2 size-4 -translate-y-1/2 text-muted" />
+              <Search className="pointer-events-none absolute left-sm top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
               <Input
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}

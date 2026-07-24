@@ -141,7 +141,7 @@ function AnimationInner() {
               </>
             ) : (
               <>
-                <Spinner className="size-6" />
+                <Spinner className="h-6 w-6" />
                 <div className="flex flex-col gap-xs">
                   <h1 className="font-display text-display-sm text-ink">
                     {state === "done" ? "Ranking complete" : "Screening candidates"}
@@ -152,7 +152,7 @@ function AnimationInner() {
                       : "Resumes are being parsed, analysed against the job description, and ranked. You can safely leave this page — the job keeps running."}
                   </p>
                 </div>
-                <Meter value={pct} className="w-full" aria-label="Screening progress" />
+                <Meter value={pct} className="w-full" ariaLabel="Screening progress" />
               </>
             )}
           </Card>

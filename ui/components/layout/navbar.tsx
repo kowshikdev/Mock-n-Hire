@@ -104,11 +104,11 @@ export function Navbar() {
         <button
           type="button"
           onClick={() => setMobileOpen((o) => !o)}
-          className="flex size-10 items-center justify-center rounded-pill text-ink hover:bg-surface-strong md:hidden"
+          className="flex h-10 w-10 items-center justify-center rounded-pill text-ink hover:bg-surface-strong md:hidden"
           aria-label={mobileOpen ? "Close menu" : "Open menu"}
           aria-expanded={mobileOpen}
         >
-          {mobileOpen ? <X className="size-5" /> : <Menu className="size-5" />}
+          {mobileOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
         </button>
       </div>
 

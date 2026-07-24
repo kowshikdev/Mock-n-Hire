@@ -18,10 +18,25 @@ import { Wordmark } from "@/components/layout/wordmark"
 
 type Role = "recruiter" | "student"
 
-/** Google's mark. lucide's `Chrome` icon is a browser logo, not a Google logo. */
+/**
+ * Google's mark. lucide's `Chrome` icon is a browser logo, not a Google logo.
+ *
+ * width/height are set as attributes, not only via a class. lucide icons
+ * carry intrinsic 24x24 attributes and so degrade gracefully if a utility
+ * class fails to compile; a bare inline SVG does not -- it expands to fill
+ * its container. That is exactly what happened when `size-4` silently
+ * produced no CSS (it needs Tailwind >= 3.4; this project is on 3.3), and
+ * this logo rendered at ~200px across the sign-in card.
+ */
 function GoogleMark() {
   return (
-    <svg viewBox="0 0 24 24" className="size-4" aria-hidden="true">
+    <svg
+      viewBox="0 0 24 24"
+      width={16}
+      height={16}
+      className="h-4 w-4 shrink-0"
+      aria-hidden="true"
+    >
       <path fill="#4285F4" d="M23.06 12.25c0-.85-.08-1.67-.22-2.45H12v4.63h6.2a5.3 5.3 0 0 1-2.3 3.48v2.9h3.72c2.17-2 3.44-4.95 3.44-8.56Z" />
       <path fill="#34A853" d="M12 23.5c3.11 0 5.72-1.03 7.62-2.79l-3.72-2.89c-1.03.69-2.35 1.1-3.9 1.1-3 0-5.54-2.03-6.45-4.75H1.7v2.98A11.5 11.5 0 0 0 12 23.5Z" />
       <path fill="#FBBC05" d="M5.55 14.17a6.9 6.9 0 0 1 0-4.34V6.85H1.7a11.5 11.5 0 0 0 0 10.3l3.85-2.98Z" />
@@ -139,7 +154,7 @@ function AuthForm() {
             href="/"
             className="mb-lg inline-flex items-center gap-xs text-caption text-muted transition-colors hover:text-ink"
           >
-            <ArrowLeft className="size-4" />
+            <ArrowLeft className="h-4 w-4" />
             Back to home
           </Link>
 
@@ -164,7 +179,7 @@ function AuthForm() {
                 onClick={() => handleOAuth("google")}
                 disabled={busy}
               >
-                {pendingProvider === "google" ? <Spinner className="size-4" /> : <GoogleMark />}
+                {pendingProvider === "google" ? <Spinner className="h-4 w-4" /> : <GoogleMark />}
                 Google
               </Button>
               <Button
@@ -173,7 +188,7 @@ function AuthForm() {
                 onClick={() => handleOAuth("github")}
                 disabled={busy}
               >
-                {pendingProvider === "github" ? <Spinner className="size-4" /> : <Github />}
+                {pendingProvider === "github" ? <Spinner className="h-4 w-4" /> : <Github />}
                 GitHub
               </Button>
             </div>
@@ -209,7 +224,7 @@ function AuthForm() {
                             : "border-hairline-strong text-body hover:border-ink"
                         )}
                       >
-                        <Icon className="size-5" />
+                        <Icon className="h-5 w-5" />
                         <span className="text-caption">{label}</span>
                       </button>
                     ))}
@@ -273,7 +288,7 @@ function AuthForm() {
               )}
 
               <Button type="submit" size="lg" disabled={busy} className="mt-xs">
-                {isLoading && <Spinner className="size-4 border-white/40 border-t-white" />}
+                {isLoading && <Spinner className="h-4 w-4 border-white/40 border-t-white" />}
                 {isSignup ? "Create account" : "Sign in"}
               </Button>
             </form>

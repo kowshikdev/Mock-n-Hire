@@ -15,8 +15,28 @@ export default function AuthCallback() {
   useEffect(() => {
     const handleAuthCallback = async () => {
       try {
+        /*
+         * The cookie-based auth-helpers client uses the PKCE flow, which
+         * returns the credential as a `?code=` query parameter rather than
+         * the implicit flow's `#access_token=` hash. supabase-js will
+         * exchange it during its own initialisation, but that races the
+         * getSession() call below -- so exchange it explicitly first when a
+         * code is present, and let getSession() confirm the result.
+         *
+         * Errors here are non-fatal: if the code was already consumed by
+         * initialisation, getSession() will still find the session.
+         */
+        const code = new URLSearchParams(window.location.search).get('code')
+        if (code) {
+          const { error: exchangeError } =
+            await supabase.auth.exchangeCodeForSession(code)
+          if (exchangeError) {
+            console.warn('Code exchange returned an error:', exchangeError)
+          }
+        }
+
         const { data, error } = await supabase.auth.getSession()
-        
+
         if (error) {
           console.error('Auth callback error:', error)
           toast.error('Authentication failed')

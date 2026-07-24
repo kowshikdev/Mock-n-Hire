@@ -23,7 +23,7 @@ export function Spinner({
       role="status"
       aria-label={label}
       className={cn(
-        'inline-block size-5 animate-spin rounded-pill border-2 border-hairline-strong border-t-ink',
+        'inline-block h-5 w-5 animate-spin rounded-pill border-2 border-hairline-strong border-t-ink',
         className
       )}
     />
@@ -66,7 +66,7 @@ export function EmptyState({
       className={cn('flex flex-col items-center gap-base py-xxl text-center', className)}
     >
       {icon && (
-        <span className="flex size-12 items-center justify-center rounded-pill bg-surface-strong text-muted [&_svg]:size-5">
+        <span className="flex h-12 w-12 items-center justify-center rounded-pill bg-surface-strong text-muted [&_svg]:h-5 [&_svg]:w-5">
           {icon}
         </span>
       )}
@@ -143,12 +143,21 @@ export function Meter({
   max = 100,
   label,
   valueLabel,
+  ariaLabel,
   className,
 }: {
   value: number;
   max?: number;
   label?: string;
   valueLabel?: string;
+  /**
+   * Accessible name when there is no visible `label`. Spelled camelCase on
+   * purpose: a hyphenated `aria-label` passed to a custom component is
+   * accepted by TSX without type-checking and then silently dropped, which
+   * is how the screening progress bar ended up with no accessible name at
+   * all despite appearing to set one.
+   */
+  ariaLabel?: string;
   className?: string;
 }) {
   const safeMax = max > 0 ? max : 100;
@@ -166,7 +175,7 @@ export function Meter({
         aria-valuenow={value}
         aria-valuemin={0}
         aria-valuemax={safeMax}
-        aria-label={label}
+        aria-label={label ?? ariaLabel}
         className="h-1.5 w-full overflow-hidden rounded-pill bg-surface-strong"
       >
         <div

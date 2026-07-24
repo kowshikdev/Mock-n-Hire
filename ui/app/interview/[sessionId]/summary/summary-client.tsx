@@ -232,7 +232,7 @@ export default function SummaryClient({ sessionId }: { sessionId: string }) {
             href="/dashboard/student"
             className="inline-flex w-fit items-center gap-xs text-caption text-muted transition-colors hover:text-ink"
           >
-            <ArrowLeft className="size-4" />
+            <ArrowLeft className="h-4 w-4" />
             Dashboard
           </Link>
           <div className="flex flex-col gap-xxs">

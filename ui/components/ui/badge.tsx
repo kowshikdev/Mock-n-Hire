@@ -41,7 +41,7 @@ function Badge({ className, variant, children, ...props }: BadgeProps) {
   const dot = variant ? dotColor[variant] : undefined;
   return (
     <span className={cn(badgeVariants({ variant }), className)} {...props}>
-      {dot && <span className={cn('size-1.5 rounded-pill', dot)} aria-hidden="true" />}
+      {dot && <span className={cn('h-1.5 w-1.5 rounded-pill', dot)} aria-hidden="true" />}
       {children}
     </span>
   );

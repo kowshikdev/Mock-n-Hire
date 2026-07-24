@@ -1,34 +1,26 @@
-import { createClient } from '@supabase/supabase-js'
-
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+import { createClientComponentClient } from '@supabase/auth-helpers-nextjs'
 
 /**
- * Singleton Supabase client. Import this everywhere rather than calling
- * createClient() again -- a second GoTrue client on the same page races the
- * first for the refresh token, and supabase-js warns about it. (The
- * interview summary page used to do exactly that.)
- */
-export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
-  auth: {
-    autoRefreshToken: true,
-    persistSession: true,
-    detectSessionInUrl: true,
-  },
-})
-
-/*
- * A hand-written `Database` type used to live here. It was deleted rather
- * than trimmed:
+ * Singleton Supabase browser client.
  *
- *   - Three of its six tables (`profiles`, `screenings`,
- *     `interview_sessions`) do not exist in the real schema and were never
- *     queried -- they described an earlier design.
- *   - The three that do exist had drifted from the actual columns.
- *   - After this refactor nothing imported the type at all.
+ * MUST be the auth-helpers client, not `createClient` from
+ * @supabase/supabase-js. That distinction is the whole reason sign-in
+ * appeared to succeed and then immediately asked you to sign in again:
  *
- * Hand-maintaining a schema mirror is how it drifted in the first place.
- * Real types should be generated from supabase/migrations via
- * `supabase gen types typescript` when they're wanted -- tracked in
- * issue #8.
+ *   - `createClient` persists the session in **localStorage**.
+ *   - `middleware.ts` reads the session from **cookies** via
+ *     `createMiddlewareClient`.
+ *
+ * Those two stores never see each other. So the browser believed it was
+ * signed in (the navbar showed the user), while middleware saw no session
+ * at all and bounced every protected route -- /dashboard, /interview,
+ * /session-history, /settings -- straight back to /auth/login. The app was
+ * effectively unusable while "signed in".
+ *
+ * `createClientComponentClient` writes the session to cookies, which the
+ * middleware and any future server component can both read. Keep this as
+ * the single shared instance: a second client racing this one for the same
+ * refresh token is its own class of bug (the interview summary page used to
+ * create one).
  */
+export const supabase = createClientComponentClient()

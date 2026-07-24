@@ -166,7 +166,7 @@ export default function StudentDashboard() {
           {resumeFile ? (
             <div className="flex items-center justify-between gap-base rounded-lg border border-hairline-strong bg-canvas-soft p-base">
               <div className="flex min-w-0 items-center gap-sm">
-                <FileText className="size-5 shrink-0 text-ink" />
+                <FileText className="h-5 w-5 shrink-0 text-ink" />
                 <div className="flex min-w-0 flex-col">
                   <span className="truncate text-body-strong text-ink">
                     {resumeFile.name}
@@ -197,7 +197,7 @@ export default function StudentDashboard() {
               )}
             >
               <input {...getInputProps()} />
-              <UploadCloud className="size-6 text-muted" />
+              <UploadCloud className="h-6 w-6 text-muted" />
               <span className="text-body-strong text-ink">
                 {isDragActive ? "Drop your resume here" : "Drop your resume"}
               </span>
@@ -209,7 +209,7 @@ export default function StudentDashboard() {
             <Button onClick={handleGenerate} disabled={!resumeFile || isGenerating}>
               {isGenerating ? (
                 <>
-                  <Spinner className="size-4 border-white/40 border-t-white" />
+                  <Spinner className="h-4 w-4 border-white/40 border-t-white" />
                   Building your interview…
                 </>
               ) : (

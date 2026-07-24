@@ -140,7 +140,7 @@ export default function SettingsPage() {
 
           <div className="flex justify-end">
             <Button onClick={handleSave} disabled={!dirty || saving}>
-              {saving && <Spinner className="size-4 border-white/40 border-t-white" />}
+              {saving && <Spinner className="h-4 w-4 border-white/40 border-t-white" />}
               Save changes
             </Button>
           </div>
