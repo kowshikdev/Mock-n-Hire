@@ -75,9 +75,6 @@ for transcription.
 ## Known issues still open
 
 - No tests, no CI (issue #8).
-- `OPENAI_API_KEY` must actually hold a **Groq** key (see `process_resumes.py`'s
-  `base_url` trick) — a real footgun, now documented in `api/.env.example`
-  alongside the separate native `GROQ_API_KEY` the student routes read directly.
 - Pre-existing route collision (not introduced by the merge): `api_service.py`'s
   own `@app.get("/export")` is unreachable — `routes/search_analytics.py`'s
   `/export` is registered first via `include_router` and wins. Not fixed here;

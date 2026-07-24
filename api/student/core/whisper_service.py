@@ -3,7 +3,7 @@ import os
 
 class WhisperService:
     def __init__(self):
-        self.client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+        self.client = Groq(api_key=os.getenv("LLM_API_KEY"))
 
     def transcribe_audio(self, audio_path: str) -> str:
         try:
