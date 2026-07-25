@@ -90,63 +90,70 @@ class ReportService:
                 if answer.get("score") is not None:
                     answer_scores.append(answer["score"])
 
-            # Calculate final score with stress adjustment
-            avg_answer_score = sum(answer_scores) / len(answer_scores) if answer_scores else 5.0
+            """
+            The final score is the mean of the answer scores. Nothing else.
+
+            It used to be multiplied by 0.8 or 0.9 depending on the "stress"
+            figure, and that was broken twice over:
+
+            1. The heuristic in stress.py started every answer at a baseline of
+               50 and only ever added to it, so an answer delivered at a
+               perfectly comfortable 120-160 wpm scored exactly 50 -- which
+               lands in the `> 30` branch here. *Every* well-paced candidate
+               was silently docked 10%, and told their delivery was
+               "Moderate Stress" while they were doing nothing wrong.
+            2. Even correctly computed, speaking pace should not move a score
+               that claims to measure interview answers. Inferring emotional
+               state from a candidate is prohibited outright under EU AI Act
+               Article 5(1)(f) in workplace and educational settings, so pace
+               stays what it honestly is: private delivery feedback, reported
+               to the candidate and excluded from the score.
+            """
+            # No scored answers means there is no score -- not 5.0, which is
+            # what this returned before: a fabricated pass mark for a session
+            # in which the candidate never said anything.
+            avg_answer_score = sum(answer_scores) / len(answer_scores) if answer_scores else None
             final_score = avg_answer_score
-            if average_stress > 60:
-                final_score *= 0.8  # 20% penalty for high stress
-            elif average_stress > 30:
-                final_score *= 0.9  # 10% penalty for moderate stress
-            logger.info(f"Final score for session {session_id}: {final_score} (base: {avg_answer_score}, adjusted for stress: {average_stress})")
+            logger.info(f"Final score for session {session_id}: {final_score} over {len(answer_scores)} scored answers")
 
             # Generate summary and recommendation using Grok with detailed prompts
             logger.debug(f"Generating summary and recommendation for session_id: {session_id}")
             # Prepare detailed data for the prompt
             question_summary = "\n".join([
-                f"- Question {qr.question_number} ({qr.category}): Score {qr.score if qr.score is not None else 'N/A'}, "
-                f"Stress {qr.stress_score if qr.stress_score is not None else 'N/A'} ({qr.stress_level})"
+                f"- Question {qr.question_number} ({qr.category}): "
+                f"Score {qr.score if qr.score is not None else 'not scored'}"
                 for qr in question_reports
             ])
-            summary_prompt = f"""
-You are an AI interviewer summarizing a mock interview session for a Software Engineer role.
+            score_line = (
+                f"{avg_answer_score:.1f} out of 10"
+                if avg_answer_score is not None
+                else "not scored -- no answers were recorded"
+            )
+            # Speaking pace is deliberately absent from both prompts. It is
+            # delivery feedback shown privately to the candidate, not evidence
+            # the model should reason about when judging their answers.
+            session_facts = f"""Candidate: {user_name}
+Questions asked: {len(questions.data)}
+Questions answered: {len(answers_dict)}
+Average answer score: {score_line}
 
-Candidate Details:
-- Name: {user_name}
-- Role: {user_role}
+Per question:
+{question_summary}"""
 
-Session Details:
-- Total Questions: {len(questions.data)}
-- Questions Answered: {len(answers_dict)}
-- Average Stress: {average_stress:.1f} ({average_stress_level})
-- Average Answer Score: {avg_answer_score:.1f}
-- Final Score (adjusted for stress): {final_score:.1f}
+            summary_prompt = f"""Summarise this mock interview for the candidate, speaking to them directly.
 
-Performance Breakdown:
-{question_summary}
+{session_facts}
 
-Provide a concise 2-3 sentence summary of the candidate's performance. Highlight their strengths in answer quality, 
-areas impacted by stress, and overall readiness for a Software Engineer role.
-"""
-            recommendation_prompt = f"""
-You are an AI interviewer providing actionable feedback for a mock interview candidate.
+Write 2-3 sentences on how they did: what their answers showed, and where
+the weakest ones fell short. Be specific and do not invent detail that is
+not above."""
 
-Candidate Details:
-- Name: {user_name}
-- Role: {user_role}
+            recommendation_prompt = f"""Give this candidate one actionable thing to work on before their next interview.
 
-Session Details:
-- Total Questions: {len(questions.data)}
-- Questions Answered: {len(answers_dict)}
-- Average Stress: {average_stress:.1f} ({average_stress_level})
-- Average Answer Score: {avg_answer_score:.1f}
-- Final Score (adjusted for stress): {final_score:.1f}
+{session_facts}
 
-Performance Breakdown:
-{question_summary}
-
-Provide a 1-2 sentence actionable recommendation to help the candidate improve their interview performance. 
-Focus on stress management or answer quality based on their performance.
-"""
+Write 1-2 sentences, addressed to them, about answer quality -- what to do
+differently, not just what was wrong."""
             # Default values in case Grok API fails
             overall_summary = "Performance summary could not be generated due to an error."
             recommendation = "Recommendation could not be generated due to an error."
@@ -165,7 +172,10 @@ Focus on stress management or answer quality based on their performance.
                 logger.info(f"Generated summary: {overall_summary}")
             except Exception as e:
                 logger.error(f"Failed to generate summary via Grok API: {str(e)}")
-                overall_summary = f"{user_name} completed {len(answers_dict)} out of {len(questions.data)} questions with an average answer score of {avg_answer_score:.1f}. Stress levels were {average_stress_level.lower()} (average stress: {average_stress:.1f})."
+                overall_summary = (
+                    f"{user_name} answered {len(answers_dict)} of {len(questions.data)} questions, "
+                    f"scoring {score_line}."
+                )
 
             try:
                 # Attempt recommendation generation with Grok
@@ -182,12 +192,16 @@ Focus on stress management or answer quality based on their performance.
                 logger.info(f"Generated recommendation: {recommendation}")
             except Exception as e:
                 logger.error(f"Failed to generate recommendation via Grok API: {str(e)}")
-                if average_stress > 60:
-                    recommendation = "Consider practicing stress management techniques, such as deep breathing, to reduce high stress during interviews."
+                # `avg_answer_score < 6` was compared unguarded, so this
+                # fallback -- the path taken precisely when the model is
+                # already failing -- raised TypeError on any session with no
+                # scored answers, turning a degraded report into a 500.
+                if avg_answer_score is None:
+                    recommendation = "Run the interview again and answer out loud so there's something to review."
                 elif avg_answer_score < 6:
-                    recommendation = "Focus on improving answer quality by practicing common Software Engineer interview questions and structuring your responses clearly."
+                    recommendation = "Work on structure: state the situation, what you did, and the result, with concrete detail in each."
                 else:
-                    recommendation = "Continue practicing to maintain your performance, and consider mock interviews to further reduce stress."
+                    recommendation = "Keep practising, and push for more specific evidence -- numbers, tools, outcomes -- in each answer."
 
             # Insert the report into the database with upsert to avoid duplicates
             logger.debug(f"Upserting report into mock_interview_reports for session_id: {session_id}")

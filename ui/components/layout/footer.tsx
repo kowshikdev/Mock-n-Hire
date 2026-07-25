@@ -123,7 +123,7 @@ function NavCard() {
       <div className="absolute -top-9 right-8 z-10 hidden flex-col items-start gap-1.5 sm:flex">
         <div
           aria-hidden="true"
-          className="flex size-[88px] rotate-[-10deg] items-center justify-center rounded-[22px] bg-surface-dark shadow-lift"
+          className="flex h-[88px] w-[88px] rotate-[-10deg] items-center justify-center rounded-[22px] bg-surface-dark shadow-lift"
         >
           <span className="rotate-[10deg] font-display text-display-md text-on-dark">
             M

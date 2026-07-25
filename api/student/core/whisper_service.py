@@ -1,17 +1,19 @@
 from groq import Groq
-import os
+
+from student.config.settings import settings
+
 
 class WhisperService:
     def __init__(self):
-        self.client = Groq(api_key=os.getenv("LLM_API_KEY"))
+        self.client = Groq(api_key=settings.LLM_API_KEY)
 
     def transcribe_audio(self, audio_path: str) -> str:
         try:
             with open(audio_path, "rb") as audio_file:
                 transcription = self.client.audio.transcriptions.create(
                     file=audio_file,
-                    model="whisper-large-v3-turbo",
-                    response_format="text"
+                    model=settings.STT_MODEL,
+                    response_format="text",
                 )
             return transcription
         except Exception as e:

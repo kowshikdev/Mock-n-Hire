@@ -83,11 +83,25 @@ async def analyze_stress(
 
         wpm = (word_count / duration) * 60
 
-    # Heuristic stress‐scoring
-    stress = 50.0
-    stress += max(0, wpm - 160) * 0.4
-    stress += max(0, 120 - wpm) * 0.4
-    stress = min(stress, 100.0)
+    """
+    Speaking pace, scored as deviation from a comfortable band.
+
+    This was `stress = 50.0` followed by two `max(0, ...)` terms that could
+    only ever add to it. An answer delivered at an ideal 120-160 wpm therefore
+    scored exactly 50 -- reported to the candidate as "Moderate" and, until it
+    was removed from report_service, used to dock 10% off their final score.
+    Every well-paced candidate was penalised for being well paced.
+
+    Zero now means ideal, which is what a deviation measure should mean.
+    """
+    if wpm > 160:
+        pace_deviation = (wpm - 160) * 0.8
+    elif wpm < 120:
+        pace_deviation = (120 - wpm) * 0.8
+    else:
+        pace_deviation = 0.0
+
+    stress = min(pace_deviation, 100.0)
 
     level = (
         "High" if stress > 60 else

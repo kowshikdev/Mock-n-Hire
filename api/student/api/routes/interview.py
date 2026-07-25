@@ -6,6 +6,7 @@ from student.utils.supabase_utils import upload_file, download_file
 from student.utils.pdf_utils import extract_text_from_pdf
 from student.models.schemas import Question, NextQuestionResponse, FinalReportResponse, UserSummaryResponse
 import os
+import tempfile
 from datetime import datetime
 import logging
 import uuid
@@ -64,9 +65,10 @@ async def upload_resume(mock_user_id: str, file: UploadFile = File(...), supabas
             logger.warning(f"Invalid file format for user {mock_user_id}: {file.filename}")
             raise HTTPException(status_code=400, detail="Only PDF files are supported")
 
-        file_content = file.file.read()
-        resume_text = extract_text_from_pdf(file_content)
-
+        # The upload used to extract_text_from_pdf() here and throw the result
+        # away -- a full PDF parse per upload for nothing, then a rewind and a
+        # second read of the same bytes. The text is extracted where it is
+        # actually used, in generate-questions.
         timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
         base_filename = file.filename.rsplit(".", 1)[0]
         file_extension = file.filename.rsplit(".", 1)[1]
@@ -87,6 +89,13 @@ async def upload_resume(mock_user_id: str, file: UploadFile = File(...), supabas
             "resume_id": resume_id,
             "user_id": mock_user_id
         }
+    except HTTPException:
+        # Every route in this file wrapped its body in `except Exception`,
+        # which also catches the HTTPExceptions raised deliberately just above
+        # it -- so a 400 "invalid UUID", a 403 "not your resume" and a 404
+        # "resume not found" all reached the client as 500s with the real
+        # status buried in the detail string. Let them through untouched.
+        raise
     except Exception as e:
         logger.error(f"Error uploading resume for user {mock_user_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error uploading resume: {str(e)}")
@@ -116,10 +125,22 @@ async def generate_questions(mock_user_id: str, resume_id: str, supabase=Depends
         file_path = resume_data.data[0]["file_path"]
         file_response = download_file("mock.interview.resumes", file_path)
 
-        with open("temp.pdf", "wb") as f:
-            f.write(file_response)
+        # extract_text_from_pdf works on bytes. The previous version still
+        # wrote those bytes to a hardcoded "temp.pdf" in the process working
+        # directory, parsed from memory anyway, then deleted the file -- so
+        # two concurrent sessions raced over one filename, and whichever
+        # finished first deleted the other's file out from under it.
         resume_text = extract_text_from_pdf(file_response)
-        os.remove("temp.pdf")
+
+        if len(resume_text.strip()) < 100:
+            # Almost always a scanned or image-only PDF. Left unchecked this
+            # generated an "interview" from an empty string: nine generic
+            # questions with no connection to the candidate at all.
+            raise HTTPException(
+                status_code=422,
+                detail="We couldn't read any text from that PDF. If it's a scan or an "
+                       "image export, please upload a text-based PDF instead.",
+            )
 
         questions = groq_service.generate_interview_questions(resume_text)
 
@@ -140,6 +161,8 @@ async def generate_questions(mock_user_id: str, resume_id: str, supabase=Depends
 
         logger.info(f"Generated {len(questions)} questions for session {session_id}")
         return {"status": "Questions generated", "session_id": session_id, "questions": [q["text"] for q in questions]}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error generating questions for user {mock_user_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error generating questions: {str(e)}")
@@ -153,21 +176,36 @@ async def get_next_question(session_id: str, question_number: int, supabase=Depe
             logger.warning(f"Invalid session_id format: {session_id}")
             raise HTTPException(status_code=400, detail="Invalid session_id format. Must be a valid UUID.")
 
-        question = supabase.table("mock_interview_questions").select("*").eq("session_id", session_id).eq("question_number", question_number).single().execute()
+        # .single() raises when the row is missing rather than returning an
+        # empty result, so asking for the question after the last one -- which
+        # is exactly how the client detects the end of an interview -- was
+        # caught by the generic handler and answered with a 500. Every
+        # completed session logged one.
+        question = (
+            supabase.table("mock_interview_questions")
+            .select("*")
+            .eq("session_id", session_id)
+            .eq("question_number", question_number)
+            .limit(1)
+            .execute()
+        )
         if not question.data:
-            logger.warning(f"Question not found for session {session_id}, question_number {question_number}")
+            logger.info(f"No question {question_number} in session {session_id} (end of interview)")
             raise HTTPException(status_code=404, detail="Question not found")
+        question_row = question.data[0]
 
         total_questions = supabase.table("mock_interview_questions").select("id", count="exact").eq("session_id", session_id).execute().count
 
         logger.info(f"Retrieved question {question_number} for session {session_id}")
         return {
             "status": "Question retrieved",
-            "question": question.data["question_text"],
-            "category": question.data["category"],
+            "question": question_row["question_text"],
+            "category": question_row["category"],
             "question_number": question_number,
             "total_questions": total_questions
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error retrieving question for session {session_id}, question_number {question_number}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error retrieving question: {str(e)}")
@@ -211,18 +249,29 @@ async def submit_answer(
 
     try:
         # Fetch question text
-        question = supabase.table("mock_interview_questions").select("question_text").eq("session_id", session_id).eq("question_number", question_number).single().execute()
+        question = (
+            supabase.table("mock_interview_questions")
+            .select("question_text")
+            .eq("session_id", session_id)
+            .eq("question_number", question_number)
+            .limit(1)
+            .execute()
+        )
         if not question.data:
             logger.warning(f"Question not found for session {session_id}, question_number {question_number}")
             raise HTTPException(status_code=404, detail="Question not found")
-        question_text = question.data["question_text"]
+        question_text = question.data[0]["question_text"]
 
-        # Transcribe audio
-        temp_audio_path = f"temp_answer_{session_id}_{question_number}_audio.webm"
-        with open(temp_audio_path, "wb") as f:
-            f.write(audio_response)
-        final_answer_text = whisper_service.transcribe_audio(temp_audio_path)
-        os.remove(temp_audio_path)
+        # Transcribe audio. tempfile rather than a hand-built name in the
+        # process working directory, and a context manager so the file is
+        # removed even when transcription raises -- the previous os.remove()
+        # was unreachable on the error path, so every Whisper failure leaked
+        # an audio file onto the container's disk.
+        with tempfile.TemporaryDirectory() as tmp:
+            temp_audio_path = os.path.join(tmp, "answer.webm")
+            with open(temp_audio_path, "wb") as f:
+                f.write(audio_response)
+            final_answer_text = whisper_service.transcribe_audio(temp_audio_path)
         audio_url = audio_path
 
         # Evaluate answer
@@ -238,7 +287,10 @@ async def submit_answer(
             "score": score,
             "feedback": feedback
         }
-        response = supabase.table("mock_interview_answers").upsert(answer_data, on_conflict="session_id , question_number").execute()
+        # on_conflict was "session_id , question_number" -- PostgREST takes
+        # this as a literal comma-separated column list, so the spaces made
+        # the second column name " question_number", which does not exist.
+        response = supabase.table("mock_interview_answers").upsert(answer_data, on_conflict="session_id,question_number").execute()
 
         supabase.table("mock_interview_questions").update({
             "is_answered": True
@@ -251,6 +303,8 @@ async def submit_answer(
             "score": score,
             "feedback": feedback
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error submitting answer for session {session_id}, question {question_number}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error submitting answer: {str(e)}")
@@ -270,6 +324,8 @@ async def get_final_report(session_id: str, report_service=Depends(get_report_se
         report = report_service.generate_final_report(session_id)
         logger.info(f"Final report generated for session {session_id}")
         return report
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error generating final report for session {session_id}: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error generating final report: {str(e)}")
@@ -287,6 +343,8 @@ async def get_user_summary(mock_user_id: str, report_service=Depends(get_report_
         summary = report_service.generate_user_summary(mock_user_id)
         logger.info(f"User summary generated for user {mock_user_id}")
         return summary
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error generating user summary for user {mock_user_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error generating user summary: {str(e)}")

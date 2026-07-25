@@ -19,4 +19,10 @@ class Settings:
     # (console.groq.com/docs/models).
     LLM_MODEL = os.getenv("LLM_MODEL", "llama-3.1-8b-instant")
 
+    # Speech-to-text, same reasoning as LLM_MODEL. This was hardcoded as
+    # "whisper-large-v3-turbo" in whisper_service.py -- a model from the same
+    # Groq catalog that retired llama3-8b-8192 out from under this codebase.
+    # There is no reason for the next one to require a deploy either.
+    STT_MODEL = os.getenv("STT_MODEL", "whisper-large-v3-turbo")
+
 settings = Settings()

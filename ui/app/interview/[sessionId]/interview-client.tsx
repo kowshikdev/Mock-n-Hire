@@ -33,6 +33,16 @@ type Question = {
 export default function InterviewPageClient({ sessionIdParam }: { sessionIdParam: string }) {
   const [questions, setQuestions] = useState<Question[]>([])
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0)
+  /*
+   * How many questions this session actually has. The backend has always
+   * returned it as `total_questions` on every /next-question response; the
+   * page ignored it and rendered `questions.length` instead. Since questions
+   * are fetched one at a time, that array holds exactly one entry until you
+   * advance -- which is why a healthy 9-question session displayed
+   * "Question 1 of 1", and why the progress bar jumped to 100% on the first
+   * screen.
+   */
+  const [totalQuestions, setTotalQuestions] = useState(0)
   const [timeLeft, setTimeLeft] = useState(120)
   const [isRecording, setIsRecording] = useState(false)
   const [videoEnabled, setVideoEnabled] = useState(true)
@@ -49,56 +59,57 @@ export default function InterviewPageClient({ sessionIdParam }: { sessionIdParam
   const videoChunksRef = useRef<Blob[]>([])
   const audioChunksRef = useRef<Blob[]>([])
 
-  // 1. Ensure session exists
+  /*
+   * Load the first question.
+   *
+   * This used to be two effects that both GET /next-question/<id>/1 on mount:
+   * one to check the session existed, one to actually use the result. Same
+   * request, twice, every time -- and the two could disagree about whether to
+   * redirect. One fetch does both jobs.
+   */
   useEffect(() => {
-    async function checkSessionExists() {
-      const sessionId = validateSessionId(sessionIdParam);
-      console.info("[Step 1] Checking if session exists for sessionId:", sessionId)
-      const res = await APIStudent(`/interview/next-question/${sessionId}/1`, { method: "GET" })
-      if (!res.ok) {
-        console.warn("[Step 1] Session not found. Redirecting...")
-        toast.error("Session not found. Please start a new interview.")
-        setTimeout(() => router.push("/dashboard/student"), 3000)
+    let cancelled = false
+
+    async function loadFirstQuestion() {
+      if (!mockUserId) {
+        toast.error("Please sign in to continue.")
+        router.push("/auth/login")
+        return
       }
-    }
-    checkSessionExists()
-  }, [sessionIdParam, router])
-
-  // Debug logging on mount
-  useEffect(() => {
-    console.info("[Step 2] Current user object:", user)
-    console.info("[Step 2] Using mockUserId:", mockUserId)
-  }, [user, mockUserId])
-
-  // 2. Initial question fetch
-  useEffect(() => {
-    async function fetchQuestions() {
       try {
-        console.info("[Step 3] Fetching first question...")
-        if (!mockUserId) {
-          toast.error("Please ensure you are logged in")
-          router.push("/auth/login")
+        const sessionId = validateSessionId(sessionIdParam)
+        const res = await APIStudent(`/interview/next-question/${sessionId}/1`, {
+          method: "GET",
+        })
+        if (!res.ok) {
+          toast.error("Session not found. Please start a new interview.")
+          setTimeout(() => router.push("/dashboard/student"), 3000)
           return
         }
-        const sessionId = validateSessionId(sessionIdParam);
-        const res = await APIStudent(`/interview/next-question/${sessionId}/1`, { method: "GET" })
-        if (!res.ok) throw new Error("Failed to fetch questions")
         const data = await res.json()
-        setQuestions([{
-          question_text: data.question,
-          category: data.category,
-          question_number: data.question_number,
-          time_limit: data.time_limit ?? 120
-        }])
+        if (cancelled) return
+        setQuestions([
+          {
+            question_text: data.question,
+            category: data.category,
+            question_number: data.question_number,
+            time_limit: data.time_limit ?? 120,
+          },
+        ])
+        setTotalQuestions(data.total_questions ?? 1)
         setTimeLeft(data.time_limit ?? 120)
-        console.info("[Step 3] First question fetched:", data)
       } catch (err: any) {
-        console.error("[Step 3] Failed to load questions:", err.message)
-        toast.error("Failed to load questions: " + err.message)
+        if (cancelled) return
+        console.error("Failed to load the first question:", err)
+        toast.error("Couldn't load your interview. Please try again.")
       }
     }
-    fetchQuestions()
-  }, [sessionIdParam, mockUserId, router, user])
+
+    void loadFirstQuestion()
+    return () => {
+      cancelled = true
+    }
+  }, [sessionIdParam, mockUserId, router])
 
   // 3. Utility to fetch specific question number (used for next question)
   const fetchQuestionByNumber = async (qNum: number): Promise<Question | null> => {
@@ -108,7 +119,7 @@ export default function InterviewPageClient({ sessionIdParam }: { sessionIdParam
       const res = await APIStudent(`/interview/next-question/${sessionId}/${qNum}`, { method: "GET" })
       if (!res.ok) throw new Error("Failed to fetch question")
       const data = await res.json()
-      console.info(`[Step 4] Question #${qNum} fetched:`, data)
+      if (data.total_questions) setTotalQuestions(data.total_questions)
       return {
         question_text: data.question,
         category: data.category,
@@ -122,9 +133,12 @@ export default function InterviewPageClient({ sessionIdParam }: { sessionIdParam
   }
 
   const currentQuestion = questions[currentQuestionIndex]
-  const progress = questions.length > 0
-    ? ((currentQuestionIndex + 1) / questions.length) * 100
+  // Progress runs against the session's real length, not the number of
+  // questions fetched so far -- the latter is always "the current one".
+  const progress = totalQuestions > 0
+    ? ((currentQuestionIndex + 1) / totalQuestions) * 100
     : 0
+  const isLastQuestion = totalQuestions > 0 && currentQuestionIndex + 1 >= totalQuestions
 
   // 4. Camera & mic initialization
   useEffect(() => {
@@ -147,23 +161,26 @@ export default function InterviewPageClient({ sessionIdParam }: { sessionIdParam
     }
   }, [])
 
-  // 5. Countdown timer logic
+  /*
+   * Countdown.
+   *
+   * The previous version listed `timeLeft` in the dependency array and
+   * returned no cleanup function. So every tick re-ran the effect and started
+   * *another* interval while the previous ones kept running: the number of
+   * live timers doubled each second, and a 2:00 budget drained in about seven
+   * seconds of wall clock. It also called handleNextQuestion() from inside the
+   * setState updater, which React invokes twice in development.
+   *
+   * One interval, owned by `isAnswering`, with the expiry handled as its own
+   * effect below (after handleNextQuestion is in scope).
+   */
   useEffect(() => {
-    let interval: NodeJS.Timeout
-    if (isAnswering && timeLeft > 0) {
-      interval = setInterval(() => {
-        setTimeLeft(prev => {
-          if (prev <= 1) {
-            console.info("[Step 6] Timer expired, auto-finishing question.")
-            handleNextQuestion()
-            return 0
-          }
-          return prev - 1
-        })
-      }, 1000)
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [isAnswering, timeLeft])
+    if (!isAnswering) return
+    const interval = setInterval(() => {
+      setTimeLeft(prev => (prev <= 1 ? 0 : prev - 1))
+    }, 1000)
+    return () => clearInterval(interval)
+  }, [isAnswering])
 
   // 6. Start answering logic
   const startAnswering = () => {
@@ -261,47 +278,80 @@ export default function InterviewPageClient({ sessionIdParam }: { sessionIdParam
     setIsAnswering(false)
     setIsRecording(false)
 
-    // 1) stop recorders, wait until both fire "onstop"
-    await new Promise<void>(res => {
-      let done = 0
-      const check = () => (++done === 2 ? res() : null)
-      videoRecorderRef.current?.stop()
-      audioRecorderRef.current?.stop()
-      videoRecorderRef.current!.onstop = check
-      audioRecorderRef.current!.onstop = check
-    })
-    await new Promise(r => setTimeout(r, 300)) // ensure chunks flushed
+    /*
+     * 1) Stop whichever recorders are actually running.
+     *
+     * This block used to assign `.onstop` through a non-null assertion on
+     * both refs and wait for exactly two callbacks. If the question timer
+     * expired before "Start recording" was ever pressed, both refs were null:
+     * the assertion threw, the promise never settled, and `loading` stayed
+     * true forever -- a spinner on a dead interview with no way out but a
+     * reload. Wait only on recorders that exist and are running.
+     */
+    const liveRecorders = [videoRecorderRef.current, audioRecorderRef.current]
+      .filter((r): r is MediaRecorder => r != null && r.state === "recording")
+
+    if (liveRecorders.length > 0) {
+      await Promise.all(
+        liveRecorders.map(
+          recorder =>
+            new Promise<void>(resolve => {
+              recorder.onstop = () => resolve()
+              recorder.stop()
+            })
+        )
+      )
+      await new Promise(r => setTimeout(r, 300)) // let the final chunk flush
+    }
 
     // 2) create blobs
     const qNum = currentQuestion!.question_number
     const videoBlob = new Blob(videoChunksRef.current, { type: "video/webm" })
     const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" })
-    console.info(`[Step 11] Created video/audio blobs for Q${qNum}: video size=${videoBlob.size}, audio size=${audioBlob.size}`)
+
+    /*
+     * Those chunks belong to the question that just ended. They were only ever
+     * cleared in startAnswering, so skipping a question without recording left
+     * the previous answer's audio sitting in the buffer -- and the skip path
+     * below would have uploaded it again under the new question's number.
+     */
+    videoChunksRef.current = []
+    audioChunksRef.current = []
 
     // 3) fetch next question immediately (start in parallel)
     const nextIdx = currentQuestionIndex + 1
     const nextNum = qNum + 1
     const nextQuestionPromise = fetchQuestionByNumber(nextNum)
 
-    try {
-      const sessionId = validateSessionId(sessionIdParam);
-      // 4) upload blobs (await)
-      await Promise.all([
-        uploadWithRetry("mock.interview.videos",
-          `videos/${sessionId}/${qNum}/video.webm`, videoBlob, "video/webm"),
-        uploadWithRetry("mock.interview.answers",
-          `answers/${sessionId}/${qNum}/audio.webm`, audioBlob, "audio/webm")
-      ])
-      console.info(`[Step 12] All uploads completed for Q${qNum}`)
-    } catch (e: any) {
-      console.error(`[Step 12] Upload failed for Q${qNum}:`, e.message)
-      toast.error(`Upload failed for Q${qNum}: ${e.message}`)
-      setLoading(false)
-      return
-    }
+    /*
+     * 4) Upload, but only if there is something to upload. A skipped or
+     * timed-out question produces a zero-byte blob; uploading it just gives
+     * Whisper silence to transcribe and the evaluator an empty string to
+     * score. Advancing without it leaves the answer genuinely unanswered,
+     * which the report already knows how to represent.
+     */
+    const hasRecording = audioBlob.size > 0
+    if (hasRecording) {
+      try {
+        const sessionId = validateSessionId(sessionIdParam)
+        await Promise.all([
+          uploadWithRetry("mock.interview.videos",
+            `videos/${sessionId}/${qNum}/video.webm`, videoBlob, "video/webm"),
+          uploadWithRetry("mock.interview.answers",
+            `answers/${sessionId}/${qNum}/audio.webm`, audioBlob, "audio/webm")
+        ])
+      } catch (e: any) {
+        console.error(`Upload failed for Q${qNum}:`, e)
+        toast.error("Couldn't save that answer. Please check your connection.")
+        setLoading(false)
+        return
+      }
 
-    // 5) queue backend processing (non-blocking)
-    notifyBackend(sessionIdParam, qNum)
+      // 5) queue backend processing (non-blocking)
+      notifyBackend(sessionIdParam, qNum)
+    } else {
+      toast("No answer recorded for that question — moving on.")
+    }
 
     // 6) wait for next question result (started earlier)
     const nextQ = await nextQuestionPromise
@@ -320,6 +370,16 @@ export default function InterviewPageClient({ sessionIdParam }: { sessionIdParam
     }
     setLoading(false)
   }
+
+  /*
+   * Time's up. Kept as its own effect rather than a call inside the countdown's
+   * setState updater, which React runs twice in development -- that fired the
+   * whole upload-and-advance sequence twice for a single expiry.
+   */
+  useEffect(() => {
+    if (isAnswering && timeLeft === 0) void handleNextQuestion()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAnswering, timeLeft])
 
   const toggleVideo = () => {
     const track = streamRef.current?.getVideoTracks()[0]
@@ -342,8 +402,6 @@ export default function InterviewPageClient({ sessionIdParam }: { sessionIdParam
     const sec = s % 60
     return `${m}:${sec.toString().padStart(2, "0")}`
   }
-
-  const isLastQuestion = currentQuestionIndex + 1 >= questions.length
 
   return (
     <div className="min-h-screen bg-canvas">
@@ -377,7 +435,7 @@ export default function InterviewPageClient({ sessionIdParam }: { sessionIdParam
           <div className="flex flex-col gap-xs">
             <div className="flex items-baseline justify-between gap-sm">
               <span className="eyebrow">
-                Question {currentQuestionIndex + 1} of {questions.length}
+                Question {currentQuestionIndex + 1} of {totalQuestions || "…"}
               </span>
               {currentQuestion?.category && (
                 <Badge variant="default">{currentQuestion.category}</Badge>
@@ -395,7 +453,7 @@ export default function InterviewPageClient({ sessionIdParam }: { sessionIdParam
                   autoPlay
                   muted
                   playsInline
-                  className={`size-full object-cover ${!videoEnabled ? "opacity-0" : ""}`}
+                  className={`h-full w-full object-cover ${!videoEnabled ? "opacity-0" : ""}`}
                 />
                 {!videoEnabled && (
                   <div className="absolute inset-0 flex items-center justify-center">

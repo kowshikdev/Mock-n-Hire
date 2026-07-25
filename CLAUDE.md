@@ -46,6 +46,29 @@ Primitives live in `ui/components/ui/`: `button`, `card`, `input`, `badge`,
 `orb`, `section`, `states` (Loading/Empty/Error/Stat/Meter), `sonner`.
 That's the whole set — it was 61 files before, 45 of them unreachable.
 
+## Interview design
+
+`INTERVIEW_ARCHITECTURE.md` at the repo root is the design of record for how a
+practice interview is planned, conducted, and scored (issues #9–#12). The
+short version:
+
+- **Sessions are time-boxed, not question-boxed.** The candidate picks a
+  duration; phase budgets (warmup/technical/behavioral/situational/closing)
+  divide it, and the question count falls out of that. Nine-questions-always
+  was arbitrary and is being removed.
+- **Two agents, deliberately different.** A **deepagents** prep agent does the
+  open-ended research (resume + role + company via Tavily) once per session in
+  the background; the live interviewer is plain Groq calls behind REST,
+  because its control flow is fixed and a human is waiting on it. Do not merge
+  them.
+- **Discrete REST, one round-trip per turn.** Not SSE — Railway caps SSE at 15
+  minutes and a session runs longer.
+- **Prep failure never blocks an interview.** The session opens with a
+  resume-derived warm-up question while prep runs; if it fails, the session
+  falls back to resume-only generation.
+- **Delivery is never a penalty.** Speaking pace is private candidate-side
+  coaching, excluded from the score (see "Fixed already").
+
 ## Layout (monorepo)
 
 - `ui/` — Next.js frontend. **Vercel Root Directory must be set to `ui`**,
@@ -152,6 +175,51 @@ That's the whole set — it was 61 files before, 45 of them unreachable.
   (`20260724192552_scope_interview_storage_policies_to_session_owner.sql`) —
   the frontend uploads audio/video directly from the browser, not through
   the backend, so this needed real RLS, not just bucket creation.
+
+- **The interview flow could not be completed at all.** A screenshot of a
+  healthy 9-question session reading "Question 1 of 1", frozen on a spinner at
+  0:00, turned out to be three separate bugs stacked:
+  - The countdown effect listed `timeLeft` in its deps and returned no
+    cleanup, so each tick started another interval on top of the last. Live
+    timers doubled every second and a 2:00 budget drained in ~7s.
+  - When it hit zero, `handleNextQuestion` assigned `.onstop` through a
+    non-null assertion on both recorder refs. If recording had never started
+    they were null, the promise never settled, and `loading` stayed true
+    forever.
+  - "1 of 1" was the page rendering `questions.length` (always 1 — questions
+    are fetched one at a time) instead of the `total_questions` the API had
+    been returning all along.
+  Also in the same pass: `size-full`/`size-[88px]` survivors from the earlier
+  Tailwind-3.3 `size-*` sweep, and skipped questions re-uploading the previous
+  answer's audio because the chunk buffers were only cleared on record-start.
+- **Every well-paced candidate was silently docked 10%.** `stress.py` started
+  each answer at a baseline of 50 and only ever added to it, so an ideal
+  120–160 wpm delivery scored exactly 50 — which `report_service` read as
+  "Moderate Stress" and multiplied the final score by 0.9 for. Pace is now a
+  deviation measure (0 = ideal) and is excluded from scoring entirely; see
+  `INTERVIEW_ARCHITECTURE.md` §8 for why it stays out.
+- **Structured LLM output instead of regex-over-markdown.** Question
+  generation asked for `- **Technical:**` and parsed `**Technical:**`, so a
+  model that followed the prompt exactly yielded zero questions; `max_tokens=500`
+  risked truncating nine questions mid-list; and the cleanup regex's unanchored
+  second branch deleted any digit-space pair anywhere ("5 years" → "years").
+  Both generation and answer evaluation now use Groq JSON mode with validation,
+  and a short question list fails loudly rather than producing a 90-second
+  interview.
+- **Every route in `interview.py` turned its own 4xx into a 500**, because the
+  bodies were wrapped in `except Exception` which also caught the
+  `HTTPException`s raised inside them. Asking for the question after the last
+  one — how the client detects the end of an interview — logged a 500 on every
+  completed session.
+- Smaller ones in the same pass: `temp.pdf` written to a hardcoded path in the
+  process CWD (two concurrent sessions raced over one filename), a full PDF
+  parse per upload whose result was discarded, `on_conflict="session_id ,
+  question_number"` (the space made it a nonexistent column),
+  `UserSummaryResponse.weakest_question_types` typed `Dict[str, float]` while
+  the service returned dicts (500 for every user with a completed session), a
+  fabricated `5.0` score for sessions with no answers, and the dead duplicate
+  `groq_whisper_service.py`. Transcription model is now `STT_MODEL`, for the
+  same reason `LLM_MODEL` is.
 
 ## Known issues still open
 
