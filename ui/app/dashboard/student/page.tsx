@@ -3,8 +3,7 @@
 import { useCallback, useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
 import Link from "next/link"
-import { useDropzone } from "react-dropzone"
-import { ArrowRight, FileText, Mic, UploadCloud } from "lucide-react"
+import { ArrowRight, Mic } from "lucide-react"
 import { toast } from "sonner"
 
 import { APIStudent } from "@/lib/apiStudent"
@@ -14,12 +13,11 @@ import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import { Card, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { Field, Input } from "@/components/ui/input"
+import { Field, Input, Textarea } from "@/components/ui/input"
 import { Container } from "@/components/ui/section"
 import { EmptyState, LoadingState, Spinner } from "@/components/ui/states"
 import { OrbField } from "@/components/ui/orb"
-
-const MAX_RESUME_BYTES = 10 * 1024 * 1024 // 10 MB
+import { ResumeLibrary } from "@/components/interview/resume-library"
 
 // 15/30/45 min, per INTERVIEW_ARCHITECTURE.md: a recruiter screen, a
 // standard technical round, a full loop stage.
@@ -48,9 +46,10 @@ export default function StudentDashboard() {
   const { user } = useAppStore()
   const userId = user?.id
 
-  const [resumeFile, setResumeFile] = useState<File | null>(null)
+  const [resumeId, setResumeId] = useState<string | null>(null)
   const [targetRole, setTargetRole] = useState("")
   const [company, setCompany] = useState("")
+  const [jobDescription, setJobDescription] = useState("")
   const [durationMinutes, setDurationMinutes] = useState(30)
   const [isGenerating, setIsGenerating] = useState(false)
   const [sessions, setSessions] = useState<SessionRow[]>([])
@@ -88,37 +87,9 @@ export default function StudentDashboard() {
     void loadSessions()
   }, [loadSessions])
 
-  const onDrop = useCallback((accepted: File[], rejected: unknown[]) => {
-    if (rejected.length > 0) {
-      toast.error("Please upload a PDF or DOCX.")
-      return
-    }
-    const file = accepted[0]
-    if (!file) return
-    if (file.size > MAX_RESUME_BYTES) {
-      toast.error("That file is over 10 MB.")
-      return
-    }
-    setResumeFile(file)
-  }, [])
-
-  const { getRootProps, getInputProps, isDragActive } = useDropzone({
-    onDrop,
-    // Matches what resume_text.py can actually read. DOCX used to be rejected
-    // by the candidate backend even though the recruiter side had always
-    // accepted it, so anyone whose resume was a Word document was locked out
-    // of practice interviews entirely.
-    accept: {
-      "application/pdf": [".pdf"],
-      "application/vnd.openxmlformats-officedocument.wordprocessingml.document": [".docx"],
-    },
-    maxFiles: 1,
-    disabled: isGenerating,
-  })
-
   const handleGenerate = async () => {
-    if (!resumeFile) {
-      toast.error("Upload your resume first.")
+    if (!resumeId) {
+      toast.error("Add a resume first.")
       return
     }
     if (!targetRole.trim()) {
@@ -132,23 +103,10 @@ export default function StudentDashboard() {
 
     setIsGenerating(true)
     try {
-      const formData = new FormData()
-      formData.append("file", resumeFile)
-
-      const uploadRes = await APIStudent(`/interview/upload-resume/${userId}`, {
-        method: "POST",
-        body: formData,
-      })
-      if (!uploadRes.ok) {
-        const detail = await uploadRes.text()
-        throw new Error(detail || "Failed to upload resume")
-      }
-      const { resume_id: resumeId } = await uploadRes.json()
-
-      // POST /interview/sessions replaces the old upload -> generate-questions
-      // pair: there is no longer a fixed batch of nine questions to generate
-      // up front. This call itself creates the session, kicks off the prep
-      // agent in the background, and returns the first (warm-up) question.
+      // The resume is already uploaded and, by now, already parsed -- the
+      // library handles that, so this is one call rather than upload-then-
+      // create. Session creation itself makes no LLM call: it returns a
+      // fixed opening question immediately and researches in the background.
       const sessionRes = await APIStudent("/interview/sessions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -156,6 +114,7 @@ export default function StudentDashboard() {
           resume_id: resumeId,
           target_role: targetRole.trim(),
           company: company.trim() || null,
+          job_description: jobDescription.trim() || null,
           duration_minutes: durationMinutes,
         }),
       })
@@ -193,47 +152,14 @@ export default function StudentDashboard() {
         <Card variant="panel" className="flex flex-col gap-base">
           <CardTitle>Start a new session</CardTitle>
 
-          {resumeFile ? (
-            <div className="flex items-center justify-between gap-base rounded-lg border border-hairline-strong bg-canvas-soft p-base">
-              <div className="flex min-w-0 items-center gap-sm">
-                <FileText className="h-5 w-5 shrink-0 text-ink" />
-                <div className="flex min-w-0 flex-col">
-                  <span className="truncate text-body-strong text-ink">
-                    {resumeFile.name}
-                  </span>
-                  <span className="text-caption text-muted">
-                    {(resumeFile.size / 1024 / 1024).toFixed(1)} MB
-                  </span>
-                </div>
-              </div>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setResumeFile(null)}
-                disabled={isGenerating}
-              >
-                Remove
-              </Button>
-            </div>
-          ) : (
-            <div
-              {...getRootProps()}
-              className={cn(
-                "flex cursor-pointer flex-col items-center gap-xs rounded-lg border border-dashed p-xl text-center transition-colors",
-                isDragActive
-                  ? "border-ink bg-surface-strong"
-                  : "border-hairline-strong hover:border-ink",
-                isGenerating && "pointer-events-none opacity-60"
-              )}
-            >
-              <input {...getInputProps()} />
-              <UploadCloud className="h-6 w-6 text-muted" />
-              <span className="text-body-strong text-ink">
-                {isDragActive ? "Drop your resume here" : "Drop your resume"}
-              </span>
-              <span className="text-caption text-muted">PDF or DOCX, up to 10 MB</span>
-            </div>
-          )}
+          <Field label="Resume" hint="Kept between sessions — pick one or add another">
+            <ResumeLibrary
+              userId={userId}
+              selectedId={resumeId}
+              onSelect={setResumeId}
+              disabled={isGenerating}
+            />
+          </Field>
 
           <div className="grid gap-base sm:grid-cols-2">
             <Field label="Target role" htmlFor="target-role">
@@ -254,6 +180,19 @@ export default function StudentDashboard() {
               />
             </Field>
           </div>
+
+          <Field
+            label="Job description"
+            hint="Optional, but the single best thing you can add -- a posting names the stack a role title only implies"
+          >
+            <Textarea
+              placeholder="Paste the job posting here…"
+              value={jobDescription}
+              onChange={(e) => setJobDescription(e.target.value)}
+              disabled={isGenerating}
+              rows={5}
+            />
+          </Field>
 
           <Field label="Duration">
             <div className="flex flex-wrap gap-sm" role="radiogroup" aria-label="Interview duration">
@@ -280,7 +219,7 @@ export default function StudentDashboard() {
           </Field>
 
           <div className="flex flex-wrap items-center gap-base">
-            <Button onClick={handleGenerate} disabled={!resumeFile || isGenerating}>
+            <Button onClick={handleGenerate} disabled={!resumeId || isGenerating}>
               {isGenerating ? (
                 <>
                   <Spinner className="h-4 w-4 border-white/40 border-t-white" />

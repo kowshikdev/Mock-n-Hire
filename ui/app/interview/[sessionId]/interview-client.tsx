@@ -5,13 +5,14 @@ import { Card } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Meter, Spinner } from "@/components/ui/states"
 import { Wordmark } from "@/components/layout/wordmark"
-import { Mic, MicOff, Video, VideoOff, SkipForward, Sparkles } from "lucide-react"
+import { Mic, MicOff, Video, VideoOff, Sparkles, Check } from "lucide-react"
 import { useRouter } from "next/navigation"
-import { useState, useEffect, useRef } from "react"
+import { useState, useEffect, useRef, useCallback } from "react"
 import { toast } from "sonner"
 import { APIStudent } from "@/lib/apiStudent"
 import { useAppStore } from "@/lib/store"
-import { supabase } from "@/lib/supabase"
+import { speakWithBrowser, cancelBrowserSpeech } from "@/lib/speech"
+import { createVoiceTurnDetector } from "@/lib/vad"
 
 const validateSessionId = (sessionId: any): string => {
   if (typeof sessionId !== "string" || !sessionId.match(/^[\w-]{36}$/)) {
@@ -39,284 +40,283 @@ type Question = {
   question_number: number
   question_text: string
   phase: string
-  time_budget_seconds: number
   is_followup: boolean
   provenance: Provenance
 }
 
+/** What the interview is doing right now. Drives the whole UI. */
+type Stage = "loading" | "ready" | "speaking" | "listening" | "thinking" | "done"
+
 /*
- * The interview is duration-driven, not a fixed list of nine questions --
- * see INTERVIEW_ARCHITECTURE.md. Each turn is one round trip:
- * POST /sessions/{id}/answer uploads nothing itself (the recording already
- * went to storage) and returns the evaluation plus whatever comes next,
- * so there is no separate "fetch the next question" call the way the old
- * fixed-list flow needed.
+ * A conversation, not a form.
+ *
+ * The previous version was a quiz: press "Start recording", watch a
+ * per-question countdown, press "Submit answer", wait, read the next
+ * question. None of that is how an interview works, and the countdown in
+ * particular actively harmed the thing being practised -- nobody rehearses
+ * for a real interview by watching a clock tick toward a hard cutoff.
+ *
+ * Now the interviewer asks out loud, listens until you stop talking, and
+ * asks the next thing. There is exactly one button in the entire session
+ * ("I'm ready"), and it exists for a technical reason rather than a design
+ * one: browsers refuse to play audio without a user gesture, and arriving
+ * here is a navigation rather than a click. That single press unlocks audio
+ * for the rest of the session.
+ *
+ * The session still has a time budget -- it is what sizes the interview --
+ * but the candidate sees one progress bar rather than a per-question
+ * countdown, and the budget is spent, never enforced mid-answer.
  */
 export default function InterviewPageClient({ sessionIdParam }: { sessionIdParam: string }) {
   const [question, setQuestion] = useState<Question | null>(null)
+  const [stage, setStage] = useState<Stage>("loading")
   const [progress, setProgress] = useState(0)
-  const [timeLeft, setTimeLeft] = useState(120)
-  const [isRecording, setIsRecording] = useState(false)
+  const [level, setLevel] = useState(0)
   const [videoEnabled, setVideoEnabled] = useState(true)
-  const [audioEnabled, setAudioEnabled] = useState(true)
-  const [isAnswering, setIsAnswering] = useState(false)
-  const [loading, setLoading] = useState(false)
-  const [ready, setReady] = useState(false)
+  const [micDenied, setMicDenied] = useState(false)
   const { user } = useAppStore()
-  const mockUserId = user?.id
   const router = useRouter()
+
   const videoRef = useRef<HTMLVideoElement>(null)
   const streamRef = useRef<MediaStream | null>(null)
-  const videoRecorderRef = useRef<MediaRecorder | null>(null)
-  const audioRecorderRef = useRef<MediaRecorder | null>(null)
-  const videoChunksRef = useRef<Blob[]>([])
-  const audioChunksRef = useRef<Blob[]>([])
+  const recorderRef = useRef<MediaRecorder | null>(null)
+  const chunksRef = useRef<Blob[]>([])
+  const audioElRef = useRef<HTMLAudioElement | null>(null)
+  const detectorRef = useRef<ReturnType<typeof createVoiceTurnDetector> | null>(null)
+  // The turn currently in flight. Guards against the detector firing twice
+  // (silence can re-trigger while the upload is still running) and against a
+  // late detector callback landing after the session has already ended.
+  const submittingRef = useRef(false)
+  const sessionId = useRef<string>("")
 
-  // 1. Load the current open question for this session.
+  try {
+    sessionId.current = validateSessionId(sessionIdParam)
+  } catch {
+    // Surfaced by the load effect below rather than thrown during render.
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* Media                                                             */
+  /* ---------------------------------------------------------------- */
+
   useEffect(() => {
     let cancelled = false
+    async function initMedia() {
+      try {
+        // Video is requested for the preview only -- it is never recorded
+        // and never uploaded. Nothing reads it, and the emotion-inference
+        // feature that would have is prohibited in a hiring context (EU AI
+        // Act Art. 5(1)(f)). Practising on camera is still worth something,
+        // so the preview stays; the upload does not.
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+        if (cancelled) {
+          stream.getTracks().forEach((t) => t.stop())
+          return
+        }
+        streamRef.current = stream
+        if (videoRef.current) videoRef.current.srcObject = stream
+      } catch (e) {
+        console.error("Media access denied.", e)
+        // Audio-only is a usable interview; video-only is not.
+        try {
+          const audioOnly = await navigator.mediaDevices.getUserMedia({ audio: true })
+          if (cancelled) {
+            audioOnly.getTracks().forEach((t) => t.stop())
+            return
+          }
+          streamRef.current = audioOnly
+          setVideoEnabled(false)
+          toast("Camera unavailable — continuing with audio only.")
+        } catch {
+          if (!cancelled) {
+            setMicDenied(true)
+            toast.error("Microphone access is required for a spoken interview.")
+          }
+        }
+      }
+    }
+    void initMedia()
+    return () => {
+      cancelled = true
+      streamRef.current?.getTracks().forEach((t) => t.stop())
+      detectorRef.current?.stop()
+      cancelBrowserSpeech()
+      audioElRef.current?.pause()
+    }
+  }, [])
 
+  /* ---------------------------------------------------------------- */
+  /* Load the open question                                            */
+  /* ---------------------------------------------------------------- */
+
+  useEffect(() => {
+    let cancelled = false
     async function loadState() {
-      if (!mockUserId) {
+      if (!user?.id) {
         toast.error("Please sign in to continue.")
         router.push("/auth/login")
         return
       }
       try {
-        const sessionId = validateSessionId(sessionIdParam)
-        const res = await APIStudent(`/interview/sessions/${sessionId}/state`, { method: "GET" })
+        const res = await APIStudent(`/interview/sessions/${sessionId.current}/state`, { method: "GET" })
         if (!res.ok) {
           toast.error("Session not found. Please start a new interview.")
-          setTimeout(() => router.push("/dashboard/student"), 3000)
+          setTimeout(() => router.push("/dashboard/student"), 2500)
           return
         }
         const data = await res.json()
         if (cancelled) return
 
         if (data.status !== "in_progress" || !data.question_id) {
-          // Already finished (or was abandoned) -- nothing left to answer.
-          router.push(`/interview/${sessionId}/summary`)
+          router.push(`/interview/${sessionId.current}/summary`)
           return
         }
-
-        setQuestion({
-          question_id: data.question_id,
-          question_number: data.question_number,
-          question_text: data.question,
-          phase: data.phase,
-          time_budget_seconds: data.time_budget_seconds ?? 120,
-          is_followup: !!data.is_followup,
-          provenance: data.provenance ?? null,
-        })
+        setQuestion(toQuestion(data))
         setProgress(data.progress ?? 0)
-        setTimeLeft(data.time_budget_seconds ?? 120)
-        setReady(true)
-      } catch (err: any) {
+        setStage("ready")
+      } catch (err) {
         if (cancelled) return
         console.error("Failed to load interview state:", err)
         toast.error("Couldn't load your interview. Please try again.")
       }
     }
-
     void loadState()
     return () => {
       cancelled = true
     }
-  }, [sessionIdParam, mockUserId, router])
+  }, [sessionIdParam, user?.id, router])
 
-  // 2. Camera & mic initialization
-  useEffect(() => {
-    async function initCamera() {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
-        streamRef.current = stream
-        if (videoRef.current) videoRef.current.srcObject = stream
-      } catch (e) {
-        console.error("Camera access denied.", e)
-        toast.error("Camera access denied. Please enable camera permissions.")
-      }
-    }
-    initCamera()
-    return () => {
-      streamRef.current?.getTracks().forEach(t => t.stop())
-    }
-  }, [])
+  /* ---------------------------------------------------------------- */
+  /* Ask (speak) -> listen -> submit -> ask again                      */
+  /* ---------------------------------------------------------------- */
 
-  // 3. Countdown -- one interval, owned by isAnswering, cleaned up on every change.
-  useEffect(() => {
-    if (!isAnswering) return
-    const interval = setInterval(() => {
-      setTimeLeft(prev => (prev <= 1 ? 0 : prev - 1))
-    }, 1000)
-    return () => clearInterval(interval)
-  }, [isAnswering])
-
-  // 4. Start answering
-  const startAnswering = () => {
-    if (!streamRef.current) return
-    videoChunksRef.current = []
-    audioChunksRef.current = []
-
-    const videoRecorder = new window.MediaRecorder(streamRef.current, {
-      mimeType: "video/webm; codecs=vp8,opus"
-    })
-    videoRecorder.ondataavailable = e => {
-      if (e.data.size > 0) videoChunksRef.current.push(e.data)
-    }
-    videoRecorderRef.current = videoRecorder
-
-    const audioStream = new MediaStream(streamRef.current.getAudioTracks())
-    const audioRecorder = new window.MediaRecorder(audioStream, { mimeType: "audio/webm" })
-    audioRecorder.ondataavailable = e => {
-      if (e.data.size > 0) audioChunksRef.current.push(e.data)
-    }
-    audioRecorderRef.current = audioRecorder
-
-    videoRecorder.start()
-    audioRecorder.start()
-
-    setIsAnswering(true)
-    setIsRecording(true)
-    toast.success("Recording started. You may begin your answer.")
-  }
-
-  async function uploadWithRetry(
-    bucket: string,
-    path: string,
-    blob: Blob,
-    contentType: string,
-    retries = 3
-  ) {
-    for (let attempt = 1; attempt <= retries; attempt++) {
-      const { error } = await supabase.storage
-        .from(bucket)
-        .upload(path, blob, { cacheControl: "3600", upsert: true, contentType })
-      if (!error) return
-      console.warn(`Upload attempt ${attempt} failed for ${bucket}/${path}:`, error.message)
-      await new Promise(r => setTimeout(r, 1000))
-    }
-    throw new Error(`Upload failed for ${bucket}/${path}`)
-  }
-
-  // 5. Submit the current answer and advance to whatever the backend
-  // decides comes next -- a follow-up, the next phase's question, or the
-  // end of the session.
-  const handleSubmitAnswer = async () => {
-    if (loading || !question) return
-    setLoading(true)
-    setIsAnswering(false)
-    setIsRecording(false)
-
-    const liveRecorders = [videoRecorderRef.current, audioRecorderRef.current]
-      .filter((r): r is MediaRecorder => r != null && r.state === "recording")
-
-    if (liveRecorders.length > 0) {
-      await Promise.all(
-        liveRecorders.map(
-          recorder =>
-            new Promise<void>(resolve => {
-              recorder.onstop = () => resolve()
-              recorder.stop()
-            })
-        )
-      )
-      await new Promise(r => setTimeout(r, 300)) // let the final chunk flush
-    }
-
-    const qNum = question.question_number
-    const videoBlob = new Blob(videoChunksRef.current, { type: "video/webm" })
-    const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" })
-    videoChunksRef.current = []
-    audioChunksRef.current = []
-
-    const hasRecording = audioBlob.size > 0
-    const sessionId = validateSessionId(sessionIdParam)
-
-    if (hasRecording) {
-      try {
-        await Promise.all([
-          uploadWithRetry("mock.interview.videos", `videos/${sessionId}/${qNum}/video.webm`, videoBlob, "video/webm"),
-          uploadWithRetry("mock.interview.answers", `answers/${sessionId}/${qNum}/audio.webm`, audioBlob, "audio/webm"),
-        ])
-      } catch (e: any) {
-        console.error(`Upload failed for Q${qNum}:`, e)
-        toast.error("Couldn't save that answer. Please check your connection.")
-        setLoading(false)
-        return
-      }
-    } else {
-      toast("No answer recorded for that question — moving on.")
-    }
+  const submitTurn = useCallback(async (audio: Blob | null) => {
+    if (submittingRef.current) return
+    submittingRef.current = true
+    setStage("thinking")
+    setLevel(0)
 
     try {
-      const res = await APIStudent(`/interview/sessions/${sessionId}/answer`, {
+      const body = new FormData()
+      // An empty blob is meaningfully different from no blob: the backend
+      // treats a turn with no audio as "nothing was said", which is a valid
+      // outcome, not an error.
+      if (audio && audio.size > 0) body.append("audio", audio, "answer.webm")
+
+      const res = await APIStudent(`/interview/sessions/${sessionId.current}/turn`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ skip: !hasRecording }),
+        body,
       })
-      if (!res.ok) {
-        const detail = await res.text()
-        throw new Error(detail || "Failed to submit answer")
-      }
+      if (!res.ok) throw new Error(await res.text())
       const data = await res.json()
 
-      if (typeof data.evaluation?.score === "number") {
-        toast.success(`Scored ${data.evaluation.score}/10`)
-      }
-      setProgress(data.progress ?? progress)
+      setProgress(data.progress ?? 0)
 
       if (data.done || !data.next) {
-        toast.success("Interview completed! Generating your report…")
-        setTimeout(() => router.push(`/interview/${sessionId}/summary`), 1200)
+        setStage("done")
+        toast.success("That's everything — putting your report together.")
+        setTimeout(() => router.push(`/interview/${sessionId.current}/summary`), 1400)
         return
       }
-
-      setQuestion({
-        question_id: data.next.question_id,
-        question_number: data.next.question_number,
-        question_text: data.next.question,
-        phase: data.next.phase,
-        time_budget_seconds: data.next.time_budget_seconds ?? 120,
-        is_followup: !!data.next.is_followup,
-        provenance: data.next.provenance ?? null,
-      })
-      setTimeLeft(data.next.time_budget_seconds ?? 120)
-    } catch (e: any) {
-      console.error("Failed to submit answer:", e)
-      toast.error("Couldn't submit that answer. Please try again.")
-    } finally {
-      setLoading(false)
+      setQuestion(toQuestion(data.next))
+      submittingRef.current = false
+      void ask(toQuestion(data.next))
+    } catch (e) {
+      console.error("Turn failed:", e)
+      toast.error("Couldn't send that answer. Retrying in a moment…")
+      submittingRef.current = false
+      // Listen again rather than stranding the candidate on a dead screen.
+      setTimeout(() => void listen(), 1500)
     }
-  }
-
-  // Time's up -- its own effect so React's dev-mode double-invoke of a
-  // setState updater can't fire the submit sequence twice.
-  useEffect(() => {
-    if (isAnswering && timeLeft === 0) void handleSubmitAnswer()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isAnswering, timeLeft])
+  }, [router])
+
+  /** Start recording and hand control to the turn detector. */
+  const listen = useCallback(async () => {
+    const stream = streamRef.current
+    if (!stream) return
+    setStage("listening")
+
+    chunksRef.current = []
+    const audioStream = new MediaStream(stream.getAudioTracks())
+    const recorder = new MediaRecorder(audioStream, { mimeType: "audio/webm" })
+    recorder.ondataavailable = (e) => {
+      if (e.data.size > 0) chunksRef.current.push(e.data)
+    }
+    recorderRef.current = recorder
+    recorder.start()
+
+    detectorRef.current?.stop()
+    detectorRef.current = createVoiceTurnDetector(audioStream, {
+      onLevel: setLevel,
+      onTurnEnd: (spoke) => {
+        detectorRef.current?.stop()
+        const rec = recorderRef.current
+        if (!rec || rec.state !== "recording") {
+          void submitTurn(spoke ? new Blob(chunksRef.current, { type: "audio/webm" }) : null)
+          return
+        }
+        rec.onstop = () => {
+          const blob = spoke ? new Blob(chunksRef.current, { type: "audio/webm" }) : null
+          chunksRef.current = []
+          void submitTurn(blob)
+        }
+        rec.stop()
+      },
+    })
+    detectorRef.current.start()
+  }, [submitTurn])
+
+  /** Say the question aloud, then start listening. */
+  const ask = useCallback(
+    async (q: Question) => {
+      setStage("speaking")
+      try {
+        const res = await APIStudent(
+          `/interview/sessions/${sessionId.current}/questions/${q.question_id}/audio`,
+          { method: "GET" },
+        )
+        if (res.ok && res.status !== 204) {
+          const blob = await res.blob()
+          const url = URL.createObjectURL(blob)
+          const el = audioElRef.current ?? new Audio()
+          audioElRef.current = el
+          el.src = url
+          await new Promise<void>((resolve) => {
+            el.onended = () => resolve()
+            el.onerror = () => resolve()
+            el.play().catch(() => resolve())
+          })
+          URL.revokeObjectURL(url)
+        } else {
+          // 204 means the server has no voice for this question. The
+          // browser's own is worse but instant, and a question the
+          // candidate can hear beats one they only read.
+          await speakWithBrowser(q.question_text)
+        }
+      } catch {
+        await speakWithBrowser(q.question_text)
+      }
+      await listen()
+    },
+    [listen],
+  )
+
+  const begin = useCallback(() => {
+    if (!question) return
+    void ask(question)
+  }, [ask, question])
+
+  /* ---------------------------------------------------------------- */
 
   const toggleVideo = () => {
     const track = streamRef.current?.getVideoTracks()[0]
-    if (track) {
-      track.enabled = !videoEnabled
-      setVideoEnabled(!videoEnabled)
-    }
-  }
-  const toggleAudio = () => {
-    const track = streamRef.current?.getAudioTracks()[0]
-    if (track) {
-      track.enabled = !audioEnabled
-      setAudioEnabled(!audioEnabled)
-    }
-  }
-  const formatTime = (s: number) => {
-    const m = Math.floor(s / 60)
-    const sec = s % 60
-    return `${m}:${sec.toString().padStart(2, "0")}`
+    if (!track) return
+    track.enabled = !videoEnabled
+    setVideoEnabled(!videoEnabled)
   }
 
-  if (!ready || !question) {
+  if (stage === "loading" || !question) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-canvas">
         <Spinner className="h-6 w-6 border-hairline-strong border-t-ink" />
@@ -326,35 +326,15 @@ export default function InterviewPageClient({ sessionIdParam }: { sessionIdParam
 
   return (
     <div className="min-h-screen bg-canvas">
-      {/* Minimal in-interview bar. Deliberately not the site navbar: this is
-          a timed, camera-on task, and a "Settings" link mid-recording is an
-          invitation to destroy a session in progress. */}
       <header className="border-b border-hairline bg-canvas">
         <div className="container-content flex h-16 items-center justify-between gap-base">
           <Wordmark />
-          <div className="flex items-center gap-base">
-            {isRecording && (
-              <span className="flex items-center gap-xs text-caption text-error">
-                <span className="h-2 w-2 animate-pulse rounded-pill bg-error" />
-                Recording
-              </span>
-            )}
-            <span
-              className="font-display text-title-md tabular-nums text-ink"
-              aria-live="polite"
-              aria-label={`${timeLeft} seconds remaining`}
-            >
-              {formatTime(timeLeft)}
-            </span>
-          </div>
+          <StatusPill stage={stage} level={level} />
         </div>
       </header>
 
       <div className="container-content py-xl">
         <div className="mx-auto flex max-w-5xl flex-col gap-base">
-          {/* Progress -- time-based: a duration-driven session doesn't know
-              its question count in advance, so this tracks elapsed time
-              against the session's total duration, not "question N of M". */}
           <div className="flex flex-col gap-xs">
             <div className="flex items-baseline justify-between gap-sm">
               <span className="eyebrow">{PHASE_LABELS[question.phase] ?? question.phase}</span>
@@ -372,7 +352,6 @@ export default function InterviewPageClient({ sessionIdParam }: { sessionIdParam
           </div>
 
           <div className="grid gap-base lg:grid-cols-3">
-            {/* Camera */}
             <Card variant="panel" className="flex flex-col gap-base lg:col-span-1">
               <div className="relative aspect-video overflow-hidden rounded-lg bg-surface-dark">
                 <video
@@ -388,7 +367,7 @@ export default function InterviewPageClient({ sessionIdParam }: { sessionIdParam
                   </div>
                 )}
               </div>
-              <div className="flex justify-center gap-sm">
+              <div className="flex justify-center">
                 <Button
                   variant={videoEnabled ? "outline" : "destructive"}
                   size="icon"
@@ -398,26 +377,17 @@ export default function InterviewPageClient({ sessionIdParam }: { sessionIdParam
                 >
                   {videoEnabled ? <Video /> : <VideoOff />}
                 </Button>
-                <Button
-                  variant={audioEnabled ? "outline" : "destructive"}
-                  size="icon"
-                  onClick={toggleAudio}
-                  aria-label={audioEnabled ? "Mute microphone" : "Unmute microphone"}
-                  aria-pressed={!audioEnabled}
-                >
-                  {audioEnabled ? <Mic /> : <MicOff />}
-                </Button>
               </div>
-              {!audioEnabled && (
-                <p className="text-caption text-error">
-                  Your microphone is muted. Your answer won&rsquo;t be recorded.
-                </p>
-              )}
+              <p className="text-caption text-muted">
+                Your camera is for you — nothing from it is recorded or uploaded.
+              </p>
             </Card>
 
-            {/* Question */}
             <Card variant="panel" className="flex flex-col gap-lg lg:col-span-2">
-              <h1 className="font-display text-display-sm text-ink md:text-display-md">
+              <h1
+                className="font-display text-display-sm text-ink md:text-display-md"
+                aria-live="polite"
+              >
                 {question.question_text}
               </h1>
               {question.provenance && question.provenance.source_count > 0 && (
@@ -431,41 +401,98 @@ export default function InterviewPageClient({ sessionIdParam }: { sessionIdParam
                 </p>
               )}
 
-              {!isAnswering ? (
-                <div className="mt-auto flex flex-col gap-base">
-                  <p className="text-body-md text-body">
-                    You&rsquo;ll have {formatTime(question.time_budget_seconds)} once you
-                    start. Speak naturally &mdash; your answer is transcribed and scored
-                    afterwards.
-                  </p>
-                  <Button size="lg" onClick={startAnswering} disabled={loading}>
-                    {loading ? (
-                      <Spinner className="h-4 w-4 border-white/40 border-t-white" />
-                    ) : (
+              <div className="mt-auto">
+                {stage === "ready" ? (
+                  <div className="flex flex-col gap-base">
+                    <p className="text-body-md text-body">
+                      This runs like a real conversation. You&rsquo;ll hear each question,
+                      answer out loud, and it moves on when you stop talking — no timers,
+                      nothing to click.
+                    </p>
+                    <Button size="lg" onClick={begin} disabled={micDenied}>
                       <Mic />
+                      I&rsquo;m ready
+                    </Button>
+                    {micDenied && (
+                      <p className="text-caption text-error">
+                        Enable microphone access in your browser, then reload this page.
+                      </p>
                     )}
-                    Start recording
-                  </Button>
-                </div>
-              ) : (
-                <div className="mt-auto flex flex-col gap-base">
-                  <p className="text-body-md text-body">
-                    Recording. Move on whenever you&rsquo;re done, or let the timer run out.
-                  </p>
-                  <Button size="lg" onClick={handleSubmitAnswer} disabled={loading}>
-                    {loading ? (
-                      <Spinner className="h-4 w-4 border-white/40 border-t-white" />
-                    ) : (
-                      <SkipForward />
-                    )}
-                    Submit answer
-                  </Button>
-                </div>
-              )}
+                  </div>
+                ) : (
+                  <StageHint stage={stage} />
+                )}
+              </div>
             </Card>
           </div>
         </div>
       </div>
     </div>
+  )
+}
+
+function toQuestion(data: any): Question {
+  return {
+    question_id: data.question_id,
+    question_number: data.question_number,
+    question_text: data.question ?? data.question_text,
+    phase: data.phase,
+    is_followup: !!data.is_followup,
+    provenance: data.provenance ?? null,
+  }
+}
+
+/** Replaces the countdown: says what the interview is doing, not how long is left. */
+function StatusPill({ stage, level }: { stage: Stage; level: number }) {
+  if (stage === "listening") {
+    return (
+      <span className="flex items-center gap-xs text-caption text-ink">
+        <span className="flex h-4 items-end gap-[2px]" aria-hidden="true">
+          {[0, 1, 2].map((i) => (
+            <span
+              key={i}
+              className="w-[3px] rounded-pill bg-ink transition-[height] duration-100"
+              style={{ height: `${Math.max(4, Math.min(16, level * 40 + (i === 1 ? 4 : 0)))}px` }}
+            />
+          ))}
+        </span>
+        Listening
+      </span>
+    )
+  }
+  const labels: Partial<Record<Stage, string>> = {
+    speaking: "Interviewer speaking",
+    thinking: "Thinking…",
+    done: "Finished",
+    ready: "Ready when you are",
+  }
+  return <span className="text-caption text-muted">{labels[stage] ?? ""}</span>
+}
+
+function StageHint({ stage }: { stage: Stage }) {
+  if (stage === "speaking") {
+    return <p className="text-body-md text-body">Listen to the question…</p>
+  }
+  if (stage === "listening") {
+    return (
+      <p className="text-body-md text-body">
+        Answer out loud. Pause when you&rsquo;re finished and the interviewer will
+        pick it up from there.
+      </p>
+    )
+  }
+  if (stage === "thinking") {
+    return (
+      <p className="flex items-center gap-sm text-body-md text-body">
+        <Spinner className="h-4 w-4 border-hairline-strong border-t-ink" />
+        Considering your answer…
+      </p>
+    )
+  }
+  return (
+    <p className="flex items-center gap-sm text-body-md text-body">
+      <Check className="h-4 w-4" />
+      Interview complete.
+    </p>
   )
 }
