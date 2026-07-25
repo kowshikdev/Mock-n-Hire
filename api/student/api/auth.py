@@ -39,14 +39,17 @@ def require_session_owner(session_id: str, current_user: dict = Depends(get_curr
     """Routes keyed by session_id (not mock_user_id directly) need the
     owning user looked up from mock_interview_sessions before it can be
     compared to the authenticated caller."""
+    # .single() raises when the row doesn't exist instead of returning an
+    # empty result -- a malformed or already-deleted session_id turned into
+    # an unhandled exception (500) here rather than the 403 below.
     session = (
         supabase.table("mock_interview_sessions")
         .select("user_id")
         .eq("id", session_id)
-        .single()
+        .limit(1)
         .execute()
     )
-    if not session.data or session.data["user_id"] != current_user["user_id"]:
+    if not session.data or session.data[0]["user_id"] != current_user["user_id"]:
         raise HTTPException(status_code=403, detail="Not authorized for this session")
     return current_user
 
