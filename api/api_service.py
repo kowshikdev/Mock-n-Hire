@@ -27,7 +27,6 @@ from routes.search_analytics import router as search_router
 # imports so it resolves correctly when this file, not student/main.py, is
 # the process root).
 from student.api.routes import interview as student_interview_router
-from student.api.routes import stress as student_stress_router
 from student.api.routes import admin as student_admin_router
 
 # ─── Load & init ─────────────────────────────────────────
@@ -66,10 +65,13 @@ app.include_router(collaboration_router)
 app.include_router(search_router)
 
 # Candidate/interview routes (was student/main.py's separate app) -- prefixes
-# /interview, /stress, /admin already declared on each router, so nothing here
-# collides with the recruiter endpoints above.
+# /interview, /admin already declared on each router, so nothing here
+# collides with the recruiter endpoints above. /stress was its own router
+# (OpenCV video-duration probe feeding a "stress" score); removed once
+# whisper_service.transcribe() started returning audio duration directly --
+# see student/core/pace.py for why the delivery signal it fed stays honestly
+# framed as pace, never "stress", now that it's computed inline in /answer.
 app.include_router(student_interview_router.router)
-app.include_router(student_stress_router.router)
 app.include_router(student_admin_router.router)
 
 # ─── Paths ───────────────────────────────────────────────

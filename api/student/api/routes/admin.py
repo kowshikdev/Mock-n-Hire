@@ -43,10 +43,13 @@ async def get_all_sessions(supabase=Depends(get_supabase), current_user: dict = 
             answers = supabase.table("mock_interview_answers").select("id", count="exact").eq("session_id", session_id).execute()
             answer_count = answers.count or 0
 
-            # Average stress
-            stress_data = supabase.table("mock_interview_stress_analysis").select("stress_score").eq("session_id", session_id).execute()
-            stress_scores = [entry["stress_score"] for entry in stress_data.data] if stress_data.data else []
-            average_stress = sum(stress_scores) / len(stress_scores) if stress_scores else None
+            # Average speaking pace, from Whisper's own duration on each
+            # answer (see student/core/pace.py) -- mock_interview_stress_analysis
+            # is retired; nothing writes to it since the OpenCV-based stress.py
+            # route was removed.
+            answer_rows = supabase.table("mock_interview_answers").select("wpm").eq("session_id", session_id).execute()
+            wpm_values = [a["wpm"] for a in (answer_rows.data or []) if a.get("wpm") is not None]
+            average_pace_wpm = sum(wpm_values) / len(wpm_values) if wpm_values else None
 
             enhanced_session = {
                 "id": session["id"],
@@ -58,7 +61,7 @@ async def get_all_sessions(supabase=Depends(get_supabase), current_user: dict = 
                 "overall_score": session.get("overall_score"),
                 "question_count": question_count,
                 "answer_count": answer_count,
-                "average_stress": average_stress,
+                "average_pace_wpm": average_pace_wpm,
             }
             enhanced_sessions.append(enhanced_session)
 
@@ -98,7 +101,10 @@ async def delete_session(session_id: str, supabase=Depends(get_supabase), curren
         questions = supabase.table("mock_interview_questions").select("question_number").eq("session_id", session_id).execute()
         question_numbers = [q["question_number"] for q in (questions.data or [])]
 
-        # Delete related rows
+        # Delete related rows. mock_interview_stress_analysis is included for
+        # sessions old enough to have rows there -- nothing writes to that
+        # table anymore, but a session created before it was retired can
+        # still have leftover rows that would otherwise never be cleaned up.
         supabase.table("mock_interview_questions").delete().eq("session_id", session_id).execute()
         supabase.table("mock_interview_answers").delete().eq("session_id", session_id).execute()
         supabase.table("mock_interview_stress_analysis").delete().eq("session_id", session_id).execute()

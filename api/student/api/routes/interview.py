@@ -21,6 +21,7 @@ from student.core.session_planner import (
 )
 from student.core import difficulty
 from student.core.prep_service import start_prep
+from student.core.pace import words_per_minute
 from student.models.schemas import FinalReportResponse, UserSummaryResponse
 import os
 import tempfile
@@ -361,7 +362,9 @@ async def submit_session_answer(
             audio_path_local = os.path.join(tmp, "answer.webm")
             with open(audio_path_local, "wb") as f:
                 f.write(audio_bytes)
-            answer_text = whisper_service.transcribe_audio(audio_path_local)
+            answer_text, audio_duration = whisper_service.transcribe(audio_path_local)
+
+        wpm = words_per_minute(answer_text, audio_duration)
 
         is_followup = question.get("parent_question_id") is not None
         followups_used = 0
@@ -389,6 +392,8 @@ async def submit_session_answer(
             "score": rubric["score"],
             "feedback": rubric["feedback"],
             "rubric": rubric,
+            "duration_seconds": audio_duration,
+            "wpm": wpm,
         }, on_conflict="session_id,question_number").execute()
 
         supabase.table("mock_interview_questions").update({
