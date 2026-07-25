@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, File, UploadFile
+from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, Body, File, UploadFile
 from pydantic import BaseModel, Field
 from student.api.dependencies import (
     get_supabase,
@@ -129,9 +129,22 @@ class CreateSessionRequest(BaseModel):
     duration_minutes: int = Field(ge=10, le=60)
 
 
+class AnswerRequest(BaseModel):
+    # The candidate chose to move on without recording. Distinguishes an
+    # intentional skip from a failed upload for logging purposes only --
+    # both end up treated as "no answer was given" (see
+    # _download_answer_audio), so this doesn't change the response shape.
+    skip: bool = False
+
+
 def _serialise_question(row: dict, is_followup: bool = False) -> dict:
     return {
         "question_id": row["id"],
+        # The storage path the frontend uploads audio/video to is keyed by
+        # question_number, not question_id -- this has to be in the response
+        # or the client has no way to construct the same path the backend
+        # will look for the recording under.
+        "question_number": row["question_number"],
         "question": row["question_text"],
         "phase": row["phase"],
         "time_budget_seconds": row["time_budget_seconds"],
@@ -155,28 +168,31 @@ def _asked_questions(rows: list[dict]) -> list[AskedQuestion]:
     ]
 
 
-async def _download_answer_audio(session_id: str, question_number: int) -> bytes:
-    """Retry-download the audio the frontend already uploaded to storage
-    for this question, tolerating the small window between the upload
-    finishing client-side and it being readable from storage."""
+async def _download_answer_audio(session_id: str, question_number: int) -> bytes | None:
+    """Retry-download the audio the frontend already uploaded to storage for
+    this question, tolerating the small window between the upload finishing
+    client-side and it being readable from storage.
+
+    Returns None -- never raises -- when nothing is found. A question can go
+    unanswered two ways: the candidate explicitly skips it (see the `skip`
+    flag on AnswerRequest below), or an upload genuinely failed client-side.
+    Both should degrade to "no answer was given", the same path
+    groq_service.evaluate_answer already has for an empty transcript, rather
+    than a 404 that strands the whole session.
+    """
     audio_path = f"answers/{session_id}/{question_number}/audio.webm"
     max_retries = 2
     delay_between_retries = 3
-    last_error = ""
 
     for attempt in range(1, max_retries + 2):
         try:
             return download_file("mock.interview.answers", audio_path)
         except Exception as e:
-            last_error = str(e)
             logger.warning(f"Audio not found on attempt {attempt} at {audio_path}: {e}")
             if attempt <= max_retries:
                 await asyncio.sleep(delay_between_retries)
 
-    raise HTTPException(
-        status_code=404,
-        detail=f"Audio file not found after {max_retries + 1} attempts. Error: {last_error}",
-    )
+    return None
 
 
 @router.post("/sessions")
@@ -325,6 +341,7 @@ async def get_session_state(
 @router.post("/sessions/{session_id}/answer")
 async def submit_session_answer(
     session_id: str,
+    payload: AnswerRequest = Body(default=AnswerRequest()),
     supabase=Depends(get_supabase),
     groq_service=Depends(get_groq_service),
     whisper_service=Depends(get_whisper_service),
@@ -356,13 +373,18 @@ async def submit_session_answer(
             raise HTTPException(status_code=409, detail="No open question for this session.")
         question = open_question.data[0]
 
-        audio_bytes = await _download_answer_audio(session_id, question["question_number"])
-
-        with tempfile.TemporaryDirectory() as tmp:
-            audio_path_local = os.path.join(tmp, "answer.webm")
-            with open(audio_path_local, "wb") as f:
-                f.write(audio_bytes)
-            answer_text, audio_duration = whisper_service.transcribe(audio_path_local)
+        answer_text = ""
+        audio_duration = None
+        if not payload.skip:
+            audio_bytes = await _download_answer_audio(session_id, question["question_number"])
+            if audio_bytes is not None:
+                with tempfile.TemporaryDirectory() as tmp:
+                    audio_path_local = os.path.join(tmp, "answer.webm")
+                    with open(audio_path_local, "wb") as f:
+                        f.write(audio_bytes)
+                    answer_text, audio_duration = whisper_service.transcribe(audio_path_local)
+            else:
+                logger.info(f"No audio found for session {session_id} Q{question['question_number']}; treating as unanswered")
 
         wpm = words_per_minute(answer_text, audio_duration)
 
@@ -382,7 +404,9 @@ async def submit_session_answer(
         )
 
         now = datetime.now(timezone.utc)
-        storage_audio_path = f"answers/{session_id}/{question['question_number']}/audio.webm"
+        storage_audio_path = (
+            f"answers/{session_id}/{question['question_number']}/audio.webm" if answer_text else None
+        )
 
         supabase.table("mock_interview_answers").upsert({
             "session_id": session_id,

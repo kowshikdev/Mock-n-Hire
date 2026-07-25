@@ -22,6 +22,15 @@ import { EmptyState, ErrorState, LoadingState, Stat } from "@/components/ui/stat
  * including users who had never run a session. It now reads the real
  * `mock_interview_sessions` rows for the signed-in user (scoped by RLS)
  * and has a genuine empty state.
+ *
+ * Score comes from an embedded `mock_interview_reports` row, not
+ * `mock_interview_sessions.overall_score` -- that column has never been
+ * written by any code path (grep confirms it), so every session here always
+ * showed "Not scored" regardless of how the candidate actually did. A
+ * report only exists once /interview/sessions/{id}/report has been called
+ * at least once (it's generated on demand, not eagerly) -- a completed
+ * session the candidate hasn't opened the report for yet legitimately shows
+ * "Not scored yet" here rather than a fabricated number.
  */
 
 type SessionRow = {
@@ -29,7 +38,21 @@ type SessionRow = {
   start_time: string | null
   end_time: string | null
   status: string | null
-  overall_score: number | null
+  target_role: string | null
+  company: string | null
+  // mock_interview_reports.session_id is that table's own primary key, so
+  // this is a one-to-one embed -- PostgREST returns a single object (or
+  // null) rather than an array for a PK-backed relationship. Typed to
+  // accept either shape defensively since this isn't exercised by an
+  // automated test against a live project.
+  mock_interview_reports: { final_score: number | null } | { final_score: number | null }[] | null
+}
+
+function reportScore(row: SessionRow): number | null {
+  const report = row.mock_interview_reports
+  if (!report) return null
+  const single = Array.isArray(report) ? report[0] : report
+  return typeof single?.final_score === "number" ? single.final_score : null
 }
 
 const dateFmt = new Intl.DateTimeFormat(undefined, {
@@ -52,7 +75,7 @@ export default function SessionHistoryPage() {
     try {
       const { data, error } = await supabase
         .from("mock_interview_sessions")
-        .select("id,start_time,end_time,status,overall_score")
+        .select("id,start_time,end_time,status,target_role,company,mock_interview_reports(final_score)")
         .eq("user_id", userId)
         .order("start_time", { ascending: false })
 
@@ -83,13 +106,10 @@ export default function SessionHistoryPage() {
    * Treating an unscored session as 0 would drag the average down and
    * misreport the user's own history back to them.
    */
-  const scored = sessions.filter((s) => typeof s.overall_score === "number")
+  const scores = sessions.map(reportScore).filter((s): s is number => s != null)
   const averageScore =
-    scored.length > 0
-      ? scored.reduce((sum, s) => sum + (s.overall_score as number), 0) / scored.length
-      : null
-  const bestScore =
-    scored.length > 0 ? Math.max(...scored.map((s) => s.overall_score as number)) : null
+    scores.length > 0 ? scores.reduce((sum, s) => sum + s, 0) / scores.length : null
+  const bestScore = scores.length > 0 ? Math.max(...scores) : null
 
   return (
     <div className="section-band">
@@ -138,7 +158,7 @@ export default function SessionHistoryPage() {
               <Stat
                 value={averageScore != null ? averageScore.toFixed(1) : "—"}
                 label="Average score"
-                hint={scored.length > 0 ? `Across ${scored.length} scored` : "None scored yet"}
+                hint={scores.length > 0 ? `Across ${scores.length} scored` : "None scored yet"}
               />
               <Stat
                 value={bestScore != null ? bestScore.toFixed(1) : "—"}
@@ -164,6 +184,7 @@ export default function SessionHistoryPage() {
               <ul className="flex flex-col gap-sm">
                 {filtered.map((s) => {
                   const complete = s.status?.toLowerCase() === "completed"
+                  const score = reportScore(s)
                   return (
                     <li key={s.id}>
                       <Card
@@ -173,14 +194,17 @@ export default function SessionHistoryPage() {
                       >
                         <div className="flex flex-col gap-xxs">
                           <CardTitle className="text-title-sm">
-                            {s.start_time
-                              ? dateFmt.format(new Date(s.start_time))
-                              : "Practice session"}
+                            {s.target_role || "Practice session"}
+                            {s.company ? ` · ${s.company}` : ""}
                           </CardTitle>
                           <span className="text-caption text-muted">
-                            {s.overall_score != null
-                              ? `Score ${Number(s.overall_score).toFixed(1)}`
-                              : "Not scored"}
+                            {s.start_time ? dateFmt.format(new Date(s.start_time)) : "—"}
+                            {" · "}
+                            {score != null
+                              ? `Score ${score.toFixed(1)}`
+                              : complete
+                                ? "Not scored yet"
+                                : "Not scored"}
                           </span>
                         </div>
                         <div className="flex items-center gap-base">
