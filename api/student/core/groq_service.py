@@ -199,11 +199,21 @@ role-general. Respond with JSON of exactly this shape: {{"text": "..."}}"""
         return {"text": text, "provenance": provenance}
 
     # ------------------------------------------------------------------ #
-    # Evaluation -- one structured rubric per answer, with the follow-up
-    # decision made in the same call rather than a second round trip.
+    # Evaluation, split across the latency boundary.
+    #
+    # `assess_turn` is what the candidate waits on: a score, the claims they
+    # made, and a follow-up if one is warranted. Small and fast, because
+    # every token here is silence between them finishing an answer and
+    # hearing the next question.
+    #
+    # `evaluate_answer` is the long-form rubric -- evidence quotes, gaps,
+    # written feedback. Nobody is waiting on it: the interviewer does not
+    # need a rubric to know what to ask next, and the candidate does not see
+    # any of it until the report. So it runs after the response has already
+    # gone out, and its extra second costs nothing.
     # ------------------------------------------------------------------ #
 
-    def evaluate_answer(
+    def assess_turn(
         self,
         question_text: str,
         answer_text: str,
@@ -211,32 +221,84 @@ role-general. Respond with JSON of exactly this shape: {{"text": "..."}}"""
         followups_used: int,
         is_followup: bool,
     ) -> dict:
-        """Score an answer on relevance/specificity/depth/structure, and
-        decide whether it earns a follow-up.
+        """Score the answer and decide the follow-up, on the critical path.
 
-        A follow-up is judged, not just permitted: recommending one is only
-        appropriate when the candidate was relevant but vague -- on-topic
-        with low specificity or evidence, not simply "this could go
-        deeper". A follow-up itself never spawns another (is_followup=True
-        forces followup_recommended=False), keeping the chain one level
-        deep regardless of what the model returns.
+        The follow-up targets a *claim* rather than the answer in general.
+        Asking the model to first name what the candidate concretely
+        asserted, then probe the least-supported of those, is what produces
+        "you mentioned you led the Kafka migration -- what broke?" instead of
+        "can you elaborate?". The old version judged the transcript as a
+        whole and had no notion of what had actually been claimed.
         """
         answer_text = (answer_text or "").strip()
         if not answer_text:
-            return _empty_answer_rubric()
+            return {"score": None, "claims": [], "followup_question": None}
 
         limit = FOLLOWUP_LIMIT_BY_PHASE.get(phase, DEFAULT_FOLLOWUP_LIMIT)
         can_followup = (not is_followup) and followups_used < limit
 
         followup_instruction = (
-            "Recommend a follow-up ONLY if the candidate was relevant but vague: "
-            "on-topic with low specificity or thin evidence. Do not recommend one "
-            "just because the topic could theoretically go deeper -- a strong, "
-            "specific answer should not get a follow-up."
+            "Then decide on a follow-up. Ask one ONLY if a specific claim was "
+            "load-bearing but unsupported -- they asserted something concrete "
+            "and gave no evidence for it. Quote the claim in your question so "
+            "it is obvious what you are probing. If every claim was either "
+            "well-evidenced or unimportant, return null: a strong, specific "
+            "answer does not earn a follow-up."
             if can_followup
-            else "Do not recommend a follow-up regardless of the answer -- the "
-                 "budget for this question is already used."
+            else "Return null for followup_question -- the follow-up budget for "
+                 "this question is already spent."
         )
+
+        prompt = f"""Assess this interview answer.
+
+Question:
+{question_text}
+
+Candidate's answer (transcribed from speech -- ignore punctuation and filler):
+{answer_text}
+
+First list the concrete, checkable claims they made -- specific technologies,
+actions they personally took, numbers, outcomes. Not vague statements.
+
+Then score the answer 0-10 overall.
+
+{followup_instruction}
+
+Respond with JSON of exactly this shape:
+{{"claims": ["..."], "score": 0, "followup_question": null}}"""
+
+        try:
+            payload = self._chat_json(
+                system="You are a fair, specific interview assessor. You reply with JSON only.",
+                user=prompt,
+                max_tokens=300,
+            )
+        except Exception as e:
+            logger.error(f"Turn assessment failed: {e}")
+            return {"score": None, "claims": [], "followup_question": None}
+
+        followup = (payload.get("followup_question") or "").strip() or None
+        return {
+            "score": _clamp10(payload.get("score")),
+            "claims": [c for c in (payload.get("claims") or []) if isinstance(c, str)][:5],
+            # Enforced here rather than trusted: the chain stays one level
+            # deep and within budget regardless of what the model returns.
+            "followup_question": followup if can_followup else None,
+        }
+
+    def evaluate_answer(self, question_text: str, answer_text: str) -> dict:
+        """The long-form rubric, off the critical path.
+
+        Scoring lives in `assess_turn`, not here: the score has to exist
+        synchronously because the difficulty staircase reads it before
+        choosing the next question, whereas none of the detail below is seen
+        until the report. This call therefore produces explanation, not
+        judgement, and deliberately does not return a score to disagree with
+        the one already recorded.
+        """
+        answer_text = (answer_text or "").strip()
+        if not answer_text:
+            return _empty_answer_rubric()
 
         prompt = f"""Evaluate this interview answer.
 
@@ -252,20 +314,14 @@ Score 0-10 on each of:
 - depth: real reasoning, not just facts recited
 - structure: clarity and organization
 
-Then give an overall score 0-10 (your holistic judgement, not necessarily
-the average of the four).
-
 Quote up to 3 short phrases from their actual answer that support your
 judgement (evidence_quotes). List real gaps, if any (gaps) -- claims made
 without support, or parts of the question left unaddressed.
 
-{followup_instruction}
-
 Respond with JSON of exactly this shape:
-{{"relevance": 0, "specificity": 0, "depth": 0, "structure": 0, "score": 0,
+{{"relevance": 0, "specificity": 0, "depth": 0, "structure": 0,
   "evidence_quotes": ["..."], "gaps": ["..."],
-  "feedback": "two or three sentences, citing what they actually said",
-  "followup_recommended": false, "followup_question": null}}"""
+  "feedback": "two or three sentences, citing what they actually said"}}"""
 
         try:
             payload = self._chat_json(
@@ -273,13 +329,12 @@ Respond with JSON of exactly this shape:
                 user=prompt,
                 max_tokens=600,
             )
-            return _normalise_rubric(payload, can_followup=can_followup)
+            return _normalise_rubric(payload)
         except Exception as e:
             logger.error(f"Answer evaluation failed: {e}")
             return {
                 **_empty_answer_rubric(),
-                "score": None,
-                "feedback": "This answer could not be scored automatically.",
+                "feedback": "This answer could not be evaluated in detail.",
             }
 
 
@@ -316,23 +371,15 @@ def _clamp10(value) -> int:
         return 0
 
 
-def _normalise_rubric(payload: dict, can_followup: bool) -> dict:
-    followup_recommended = can_followup and bool(payload.get("followup_recommended"))
-    followup_question = (payload.get("followup_question") or "").strip() or None
-    if not followup_recommended:
-        followup_question = None
-
+def _normalise_rubric(payload: dict) -> dict:
     return {
         "relevance": _clamp10(payload.get("relevance")),
         "specificity": _clamp10(payload.get("specificity")),
         "depth": _clamp10(payload.get("depth")),
         "structure": _clamp10(payload.get("structure")),
-        "score": _clamp10(payload.get("score")),
         "evidence_quotes": [q for q in (payload.get("evidence_quotes") or []) if isinstance(q, str)][:3],
         "gaps": [g for g in (payload.get("gaps") or []) if isinstance(g, str)][:5],
         "feedback": (payload.get("feedback") or "").strip() or "No feedback was returned for this answer.",
-        "followup_recommended": followup_recommended,
-        "followup_question": followup_question,
     }
 
 
@@ -342,10 +389,7 @@ def _empty_answer_rubric() -> dict:
         "specificity": 0,
         "depth": 0,
         "structure": 0,
-        "score": 0,
         "evidence_quotes": [],
         "gaps": ["No answer was given."],
         "feedback": "No answer was recorded for this question.",
-        "followup_recommended": False,
-        "followup_question": None,
     }

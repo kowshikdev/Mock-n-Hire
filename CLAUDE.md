@@ -18,7 +18,10 @@ once (see "Fixed already"): `LLM_MODEL` (default `llama-3.1-8b-instant`) for
 fast per-turn calls, `AGENT_MODEL` (default `openai/gpt-oss-120b`) for the
 deepagents prep agent, `STT_MODEL` (default `whisper-large-v3-turbo`) for
 transcription. `TAVILY_API_KEY` is optional — unset means every interview
-runs in generic (resume-only) mode instead of failing to start.
+runs in generic (resume-only) mode instead of failing to start. Text-to-speech
+adds `TTS_ENABLED`/`TTS_MODEL`/`TTS_VOICE`/`TTS_FORMAT`, all optional and all
+on the same Groq key; unset behaves as before plus a voice, and any failure
+falls back to the browser's own `speechSynthesis`.
 
 ## Design system
 
@@ -61,7 +64,37 @@ short version:
   (warmup/technical/behavioral/situational/closing) divide it, and the
   question count falls out of that — no longer a fixed nine.
   `student/core/session_planner.py` builds the plan and decides each turn's
-  next phase from real `asked_at`/`answered_at` timestamps.
+  next phase from real `asked_at`/`answered_at` timestamps. Budgets are
+  *internal*: the candidate sees one progress bar, never a per-question
+  countdown, and is never cut off mid-answer.
+- **It's a conversation, not a form.** The interviewer speaks each question
+  (Groq TTS, browser `speechSynthesis` as fallback), the browser detects
+  end-of-turn from ~1.6s of silence after sustained speech
+  (`ui/lib/vad.ts`), and the next question follows. There is exactly one
+  button in a session — "I'm ready" — and it exists only because browsers
+  refuse to play audio without a user gesture.
+- **Every interview opens with the same fixed self-introduction.**
+  `session_planner.OPENING_QUESTION`, served with no LLM call. Generating it
+  broke the one convention every candidate has rehearsed, put a Groq call on
+  the critical path of session creation, and wasted the best grounding
+  signal in the session. It also buys prep its runway (~45s research vs.
+  60–90s of answer).
+- **Latency is a design constraint, not an implementation detail.** On the
+  critical path: transcription, `assess_turn` (score + claims + follow-up
+  decision), and question generation *only* when the bank has nothing for
+  that phase. Off it: the long-form rubric and archiving the answer audio.
+  Serving a prepared question costs no LLM call at all. The numeric score
+  stays synchronous because the difficulty staircase reads it; the
+  background rubric pass deliberately cannot overwrite it.
+- **A job description is optional but is the strongest grounding signal.**
+  `groq_service.analyse_fit` compares résumé against role/JD into
+  gap/partial/strength focus areas, and generated questions are steered at
+  them, gaps first. Candidates keep up to 3 résumés with one default
+  (`student/core/resume_library.py`), so a repeat session needs only a role.
+- **Video is never recorded.** The camera preview stays; nothing is uploaded.
+  Nothing read it, the feature that would have is prohibited (see below),
+  and it cost a second MediaRecorder plus the bug surface that produced the
+  stuck-spinner failure.
 - **Two agents, deliberately different.** A **deepagents** prep agent
   (`student/agents/`) does the open-ended research (resume + role + company
   via Tavily) once per session in the background; the live interviewer
@@ -69,16 +102,24 @@ short version:
   because its control flow is fixed and a human is waiting on it. Do not
   merge them.
 - **Discrete REST, one round-trip per turn.** `POST /interview/sessions` ->
-  `POST /interview/sessions/{id}/answer` (repeated) -> `GET
-  /interview/sessions/{id}/report`. Not SSE — Railway caps SSE at 15 minutes
-  and a session runs longer.
-- **Prep failure never blocks an interview.** The session opens with a
-  resume-derived warm-up question while prep runs in a `BackgroundTasks`
-  job; if it fails, times out, or `TAVILY_API_KEY` is unset, the session
-  falls back to resume-only generation. `mock_interview_briefs.status` is
-  always driven to a terminal state (`ready`/`failed`) by
-  `student/core/prep_service.py` — the live loop only ever reads it, never
-  waits on it.
+  `POST /interview/sessions/{id}/turn` (repeated, audio in the request body)
+  -> `GET /interview/sessions/{id}/report`. Not SSE — Railway caps SSE at 15
+  minutes and a session runs longer. `/answer` is the deprecated predecessor,
+  kept only because frontend and backend deploy independently.
+- **Prep failure never blocks an interview.** The session opens on the fixed
+  opener while prep runs in a `BackgroundTasks` job. Prep is two stages with
+  very different reliability — a fast résumé-vs-JD fit pass (~2s, no external
+  deps) and the Tavily research (minutes, network-dependent) — written
+  separately, so a research failure downgrades the session to a JD-grounded
+  interview rather than discarding everything. `mock_interview_briefs.status`
+  is always driven to a terminal state by `student/core/prep_service.py`;
+  the live loop only ever reads it, never waits on it.
+- **The prep agent is never asked for structured output.** Both of
+  langchain's strategies are unsound for a tool-using agent on Groq: JSON
+  mode is rejected outright when tools are bound, and `ToolStrategy`'s forced
+  `tool_choice` gets answered in prose by `gpt-oss-120b` (`tool_use_failed`).
+  The agent ends in prose and a separate tool-free call serialises it. Don't
+  reintroduce `response_format` on `create_deep_agent`.
 - **Difficulty is a 2-down/1-up staircase** across 5 named tiers
   (`student/core/difficulty.py`), passed to the model as a tier name + a
   written behavioural anchor, never a bare number.
@@ -274,12 +315,20 @@ short version:
   audio duration directly from the transcription call already being made,
   and that duration drives `student/core/pace.py`'s delivery-pace figure,
   which stays out of `final_score` for the same EU AI Act reasoning as
-  above. A real, previously-unnoticed bug surfaced while writing a
-  realistic test fixture for the report: the Supabase embed
-  `user_id:mock_interview_users(user_id:users(...))` nests *twice* (name/
-  email live on `users`, one level deeper than `mock_interview_users`), and
-  `report_service.py` had always read one level too shallow — every report
-  this service ever generated silently said "Unknown User".
+  above.
+- **No report had ever been generated, for anyone.** `report_service.py`
+  embedded `mock_interview_sessions -> mock_interview_users -> users` to get
+  the candidate's name. That relationship does not exist: both
+  `mock_interview_users.user_id` and `public.users.user_id` are foreign keys
+  onto `auth.users.id`, making the two tables *siblings* with no FK between
+  them, so PostgREST returned `PGRST200` on every call and
+  `mock_interview_reports` held zero rows. An earlier pass "fixed" how
+  deeply that response was read — a fix to a line that could never run,
+  because the nesting had been verified with raw SQL, which proves the data
+  relationship exists but says nothing about whether PostgREST can follow it.
+  Now a direct lookup on `users` by the auth uid the session already stores.
+  **Verify PostgREST embeds by issuing the actual `.select()` string, not by
+  reasoning about the schema.**
 
 ## Known issues still open
 

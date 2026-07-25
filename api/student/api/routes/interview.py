@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, Body, File, UploadFile
+from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, Body, File, UploadFile, Response
 from pydantic import BaseModel, Field
 from student.api.dependencies import (
     get_supabase,
@@ -6,7 +6,9 @@ from student.api.dependencies import (
     get_whisper_service,
     get_report_service,
     get_resume_parser,
+    get_tts_service,
 )
+from student.core.tts_service import TTSUnavailable
 from student.api.auth import get_current_user, require_self, require_session_owner
 from student.utils.supabase_utils import upload_file, download_file, remove_file
 from resume_text import extract_resume_text, UnreadableResume, SUPPORTED_EXTENSIONS
@@ -473,153 +475,213 @@ async def get_session_state(
         raise HTTPException(status_code=500, detail=f"Error reading session state: {str(e)}")
 
 
-@router.post("/sessions/{session_id}/answer")
-async def submit_session_answer(
-    session_id: str,
-    payload: AnswerRequest = Body(default=AnswerRequest()),
-    supabase=Depends(get_supabase),
-    groq_service=Depends(get_groq_service),
-    whisper_service=Depends(get_whisper_service),
-    current_user: dict = Depends(require_session_owner),
-):
+def _evaluate_in_background(
+    supabase, groq_service, session_id: str, question_number: int,
+    question_text: str, answer_text: str,
+) -> None:
+    """Write the long-form rubric after the response has already gone out.
+
+    Deliberately does not touch `score`: that was decided synchronously by
+    `assess_turn` and the difficulty staircase has already acted on it.
+    Re-deriving it here would let the report disagree with the interview.
+    """
     try:
-        try:
-            uuid.UUID(session_id)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid session_id format.")
-
-        session_row = supabase.table("mock_interview_sessions").select("*").eq("id", session_id).limit(1).execute()
-        if not session_row.data:
-            raise HTTPException(status_code=404, detail="Session not found")
-        session = session_row.data[0]
-        if session["status"] != "in_progress":
-            raise HTTPException(status_code=409, detail="This session has already ended.")
-
-        open_question = (
-            supabase.table("mock_interview_questions")
-            .select("*")
+        rubric = groq_service.evaluate_answer(question_text, answer_text)
+        existing = (
+            supabase.table("mock_interview_answers")
+            .select("rubric")
             .eq("session_id", session_id)
-            .eq("is_answered", False)
-            .order("question_number", desc=True)
+            .eq("question_number", question_number)
             .limit(1)
             .execute()
         )
-        if not open_question.data:
-            raise HTTPException(status_code=409, detail="No open question for this session.")
-        question = open_question.data[0]
-
-        answer_text = ""
-        audio_duration = None
-        if not payload.skip:
-            audio_bytes = await _download_answer_audio(session_id, question["question_number"])
-            if audio_bytes is not None:
-                with tempfile.TemporaryDirectory() as tmp:
-                    audio_path_local = os.path.join(tmp, "answer.webm")
-                    with open(audio_path_local, "wb") as f:
-                        f.write(audio_bytes)
-                    answer_text, audio_duration = whisper_service.transcribe(audio_path_local)
-            else:
-                logger.info(f"No audio found for session {session_id} Q{question['question_number']}; treating as unanswered")
-
-        wpm = words_per_minute(answer_text, audio_duration)
-
-        is_followup = question.get("parent_question_id") is not None
-        followups_used = 0
-        if not is_followup:
-            existing_followups = (
-                supabase.table("mock_interview_questions")
-                .select("id", count="exact")
-                .eq("parent_question_id", question["id"])
-                .execute()
-            )
-            followups_used = existing_followups.count or 0
-
-        rubric = groq_service.evaluate_answer(
-            question["question_text"], answer_text, question["phase"], followups_used, is_followup,
-        )
-
-        now = datetime.now(timezone.utc)
-        storage_audio_path = (
-            f"answers/{session_id}/{question['question_number']}/audio.webm" if answer_text else None
-        )
-
-        supabase.table("mock_interview_answers").upsert({
-            "session_id": session_id,
-            "question_number": question["question_number"],
-            "answer_text": answer_text,
-            "audio_url": storage_audio_path,
-            "score": rubric["score"],
+        merged = {**((existing.data[0].get("rubric") if existing.data else None) or {}), **rubric}
+        supabase.table("mock_interview_answers").update({
+            "rubric": merged,
             "feedback": rubric["feedback"],
-            "rubric": rubric,
-            "duration_seconds": audio_duration,
-            "wpm": wpm,
-        }, on_conflict="session_id,question_number").execute()
+        }).eq("session_id", session_id).eq("question_number", question_number).execute()
+    except Exception as e:
+        logger.warning(f"Background evaluation failed for {session_id} Q{question_number}: {e}")
 
-        supabase.table("mock_interview_questions").update({
-            "is_answered": True,
-            "answered_at": now.isoformat(),
-        }).eq("id", question["id"]).execute()
 
-        diff_state = difficulty.update(
-            difficulty.DifficultyState(tier=session["difficulty_tier"], streak=session["difficulty_streak"]),
-            rubric["score"],
+def _archive_answer_audio(session_id: str, question_number: int, audio_bytes: bytes) -> None:
+    """Keep the recording so the report can play it back.
+
+    Off the critical path on purpose. The transcript is already in hand by
+    the time this runs, so the interview never waits on a storage write, and
+    a failed upload costs playback in the report rather than the turn.
+    """
+    try:
+        upload_file(
+            "mock.interview.answers",
+            f"answers/{session_id}/{question_number}/audio.webm",
+            audio_bytes,
         )
-        if diff_state.tier != session["difficulty_tier"] or diff_state.streak != session["difficulty_streak"]:
-            supabase.table("mock_interview_sessions").update({
+    except Exception as e:
+        logger.warning(f"Could not archive audio for {session_id} Q{question_number}: {e}")
+
+
+def _open_question(supabase, session_id: str) -> dict:
+    rows = (
+        supabase.table("mock_interview_questions")
+        .select("*")
+        .eq("session_id", session_id)
+        .eq("is_answered", False)
+        .order("question_number", desc=True)
+        .limit(1)
+        .execute()
+    )
+    if not rows.data:
+        raise HTTPException(status_code=409, detail="No open question for this session.")
+    return rows.data[0]
+
+
+def _live_session(supabase, session_id: str) -> dict:
+    try:
+        uuid.UUID(session_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid session_id format.")
+
+    rows = supabase.table("mock_interview_sessions").select("*").eq("id", session_id).limit(1).execute()
+    if not rows.data:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if rows.data[0]["status"] != "in_progress":
+        raise HTTPException(status_code=409, detail="This session has already ended.")
+    return rows.data[0]
+
+
+def _advance_turn(
+    supabase, groq_service, background_tasks: BackgroundTasks,
+    session: dict, question: dict,
+    answer_text: str, audio_duration: float | None,
+    audio_bytes: bytes | None = None,
+) -> dict:
+    """Record one answer and decide what the interviewer says next.
+
+    Everything on this path is something the candidate is actively waiting
+    on, so it is kept to one Groq call (`assess_turn`) plus, only when
+    advancing to a phase with nothing prepared, one more to generate a
+    question. The long-form rubric and the audio archive both run after the
+    response is sent -- neither is needed to know what to ask next.
+    """
+    session_id = session["id"]
+    now = datetime.now(timezone.utc)
+    wpm = words_per_minute(answer_text, audio_duration)
+
+    is_followup = question.get("parent_question_id") is not None
+    followups_used = 0
+    if not is_followup:
+        existing = (
+            supabase.table("mock_interview_questions")
+            .select("id", count="exact")
+            .eq("parent_question_id", question["id"])
+            .execute()
+        )
+        followups_used = existing.count or 0
+
+    assessment = groq_service.assess_turn(
+        question["question_text"], answer_text, question["phase"], followups_used, is_followup,
+    )
+
+    supabase.table("mock_interview_answers").upsert({
+        "session_id": session_id,
+        "question_number": question["question_number"],
+        "answer_text": answer_text,
+        "audio_url": (
+            f"answers/{session_id}/{question['question_number']}/audio.webm" if answer_text else None
+        ),
+        "score": assessment["score"],
+        # The rubric starts as just the claims; _evaluate_in_background
+        # merges the rest in shortly after. A report generated in the gap
+        # renders with what is there rather than failing.
+        "rubric": {"claims": assessment["claims"]},
+        "duration_seconds": audio_duration,
+        "wpm": wpm,
+    }, on_conflict="session_id,question_number").execute()
+
+    supabase.table("mock_interview_questions").update({
+        "is_answered": True,
+        "answered_at": now.isoformat(),
+    }).eq("id", question["id"]).execute()
+
+    if answer_text:
+        background_tasks.add_task(
+            _evaluate_in_background, supabase, groq_service, session_id,
+            question["question_number"], question["question_text"], answer_text,
+        )
+    if audio_bytes:
+        background_tasks.add_task(
+            _archive_answer_audio, session_id, question["question_number"], audio_bytes
+        )
+
+    diff_state = difficulty.update(
+        difficulty.DifficultyState(tier=session["difficulty_tier"], streak=session["difficulty_streak"]),
+        assessment["score"],
+    )
+    if diff_state.tier != session["difficulty_tier"] or diff_state.streak != session["difficulty_streak"]:
+        supabase.table("mock_interview_sessions").update({
+            "difficulty_tier": diff_state.tier,
+            "difficulty_streak": diff_state.streak,
+        }).eq("id", session_id).execute()
+
+    all_questions = supabase.table("mock_interview_questions").select("*").eq("session_id", session_id).execute().data
+    asked = _asked_questions(all_questions)
+    plan = session["plan"]
+    start = datetime.fromisoformat(session["start_time"])
+    next_number = max(q["question_number"] for q in all_questions) + 1
+
+    next_payload = None
+    done = False
+
+    session_past_hard_stop = (now - start).total_seconds() >= session["duration_seconds"] * GRACE_FACTOR
+
+    if assessment["followup_question"] and not session_past_hard_stop:
+        remaining = phase_remaining_seconds(plan, asked, question["phase"])
+        # A follow-up needs at least half a minute to be worth asking --
+        # anything shorter and the phase is effectively already over.
+        # Phase budgets are fractions of the total duration, so this
+        # rarely diverges from the session-wide hard stop above -- the
+        # check exists for the rounding edge case where it does.
+        if remaining >= 30:
+            followup_budget = int(min(90, max(30, remaining)))
+            fq = supabase.table("mock_interview_questions").insert({
+                "session_id": session_id,
+                "question_text": assessment["followup_question"],
+                "category": question["phase"],
+                "question_number": next_number,
+                "is_answered": False,
+                "parent_question_id": question["id"],
+                "phase": question["phase"],
                 "difficulty_tier": diff_state.tier,
-                "difficulty_streak": diff_state.streak,
+                "time_budget_seconds": followup_budget,
+                "asked_at": now.isoformat(),
+            }).execute()
+            next_payload = _serialise_question(fq.data[0], is_followup=True)
+
+    if next_payload is None:
+        slot = next_slot(plan, asked, start, now, session["duration_seconds"])
+        if slot is None:
+            supabase.table("mock_interview_sessions").update({
+                "status": "completed",
+                "end_time": now.isoformat(),
             }).eq("id", session_id).execute()
+            done = True
+        else:
+            brief_row = _read_brief(supabase, session_id)
+            seed = _pick_seed(brief_row, slot.phase, diff_state.tier, all_questions)
+            # Only consulted when nothing was prepared for this phase -- a
+            # prepared question is already targeted, and steering it again
+            # would just cost a generation call for no gain.
+            focus_area = None if seed else _pick_focus_area(brief_row, all_questions)
 
-        all_questions = supabase.table("mock_interview_questions").select("*").eq("session_id", session_id).execute().data
-        asked = _asked_questions(all_questions)
-        plan = session["plan"]
-        start = datetime.fromisoformat(session["start_time"])
-        next_number = max(q["question_number"] for q in all_questions) + 1
-
-        next_payload = None
-        done = False
-
-        session_past_hard_stop = (now - start).total_seconds() >= session["duration_seconds"] * GRACE_FACTOR
-
-        if rubric["followup_recommended"] and rubric["followup_question"] and not session_past_hard_stop:
-            remaining = phase_remaining_seconds(plan, asked, question["phase"])
-            # A follow-up needs at least half a minute to be worth asking --
-            # anything shorter and the phase is effectively already over.
-            # Phase budgets are fractions of the total duration, so this
-            # rarely diverges from the session-wide hard stop above -- the
-            # check exists for the rounding edge case where it does.
-            if remaining >= 30:
-                followup_budget = int(min(90, max(30, remaining)))
-                fq = supabase.table("mock_interview_questions").insert({
-                    "session_id": session_id,
-                    "question_text": rubric["followup_question"],
-                    "category": question["phase"],
-                    "question_number": next_number,
-                    "is_answered": False,
-                    "parent_question_id": question["id"],
-                    "phase": question["phase"],
-                    "difficulty_tier": diff_state.tier,
-                    "time_budget_seconds": followup_budget,
-                    "asked_at": now.isoformat(),
-                }).execute()
-                next_payload = _serialise_question(fq.data[0], is_followup=True)
-
-        if next_payload is None:
-            slot = next_slot(plan, asked, start, now, session["duration_seconds"])
-            if slot is None:
-                supabase.table("mock_interview_sessions").update({
-                    "status": "completed",
-                    "end_time": now.isoformat(),
-                }).eq("id", session_id).execute()
-                done = True
+            if seed:
+                # No LLM call at all. This is the common path once prep has
+                # landed, and it is what keeps the gap between a candidate
+                # finishing an answer and hearing the next question short.
+                generated = groq_service.generate_next_question(
+                    "", session["target_role"], slot.phase, diff_state.tier, [], seed,
+                )
             else:
-                brief_row = _read_brief(supabase, session_id)
-                seed = _pick_seed(brief_row, slot.phase, diff_state.tier, all_questions)
-                # Only consulted when nothing was prepared for this phase --
-                # a prepared question is already targeted, and steering it
-                # again would just cost a generation call for no gain.
-                focus_area = None if seed else _pick_focus_area(brief_row, all_questions)
-
                 profile_row = (
                     supabase.table("mock_interview_resume_profiles")
                     .select("profile")
@@ -628,36 +690,136 @@ async def submit_session_answer(
                     .execute()
                 )
                 profile = profile_row.data[0]["profile"] if profile_row.data else {}
-                candidate_context = profile_to_prompt_context(profile)
-                asked_texts = [q["question_text"] for q in all_questions]
-
                 generated = groq_service.generate_next_question(
-                    candidate_context, session["target_role"], slot.phase, diff_state.tier,
-                    asked_texts, seed, focus_area,
+                    profile_to_prompt_context(profile), session["target_role"],
+                    slot.phase, diff_state.tier,
+                    [q["question_text"] for q in all_questions], None, focus_area,
                 )
-                nq = supabase.table("mock_interview_questions").insert({
-                    "session_id": session_id,
-                    "question_text": generated["text"],
-                    "category": slot.phase,
-                    "question_number": next_number,
-                    "is_answered": False,
-                    "phase": slot.phase,
-                    "difficulty_tier": diff_state.tier,
-                    "time_budget_seconds": slot.time_budget_seconds,
-                    "provenance": generated.get("provenance"),
-                    "asked_at": now.isoformat(),
-                }).execute()
-                next_payload = _serialise_question(nq.data[0])
 
-        logger.info(f"Answer submitted for session {session_id}, question {question['question_number']}. Score: {rubric['score']}")
+            nq = supabase.table("mock_interview_questions").insert({
+                "session_id": session_id,
+                "question_text": generated["text"],
+                "category": slot.phase,
+                "question_number": next_number,
+                "is_answered": False,
+                "phase": slot.phase,
+                "difficulty_tier": diff_state.tier,
+                "time_budget_seconds": slot.time_budget_seconds,
+                "provenance": generated.get("provenance"),
+                "asked_at": now.isoformat(),
+            }).execute()
+            next_payload = _serialise_question(nq.data[0])
+
+    logger.info(
+        f"Turn recorded for session {session_id} Q{question['question_number']}: "
+        f"score={assessment['score']}, followup={bool(assessment['followup_question'])}"
+    )
+    return {
+        "transcript": answer_text,
+        "score": assessment["score"],
+        "next": next_payload,
+        "done": done,
+        "progress": progress_fraction(plan, asked, start, now, session["duration_seconds"]),
+    }
+
+
+@router.post("/sessions/{session_id}/turn")
+async def submit_turn(
+    session_id: str,
+    background_tasks: BackgroundTasks,
+    audio: UploadFile | None = File(default=None),
+    supabase=Depends(get_supabase),
+    groq_service=Depends(get_groq_service),
+    whisper_service=Depends(get_whisper_service),
+    current_user: dict = Depends(require_session_owner),
+):
+    """One conversational turn: the candidate's speech in, the interviewer's
+    next question out.
+
+    The audio arrives in the request body rather than via storage. The
+    previous flow had the browser upload to Supabase and the backend then
+    re-download it, with two retries and three-second sleeps between them --
+    a round trip through storage plus, on a slow write, up to six seconds of
+    designed-in silence, all on the path a candidate is sat waiting on.
+    Archiving still happens, just afterwards, where nobody is waiting.
+
+    Omitting `audio` means the candidate had nothing to say. That is treated
+    as an unanswered question rather than an error: it is indistinguishable
+    from a failed recording at this layer, and neither should end a session.
+    """
+    try:
+        session = _live_session(supabase, session_id)
+        question = _open_question(supabase, session_id)
+
+        answer_text, audio_duration, audio_bytes = "", None, None
+        if audio is not None:
+            audio_bytes = await audio.read()
+            if audio_bytes:
+                with tempfile.TemporaryDirectory() as tmp:
+                    local = os.path.join(tmp, "answer.webm")
+                    with open(local, "wb") as f:
+                        f.write(audio_bytes)
+                    answer_text, audio_duration = whisper_service.transcribe(local)
+            else:
+                audio_bytes = None
+
+        if not answer_text:
+            logger.info(f"No speech for session {session_id} Q{question['question_number']}; treating as unanswered")
+
+        return _advance_turn(
+            supabase, groq_service, background_tasks, session, question,
+            answer_text, audio_duration, audio_bytes,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error handling turn for session {session_id}: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error handling turn: {str(e)}")
+
+
+@router.post("/sessions/{session_id}/answer", deprecated=True)
+async def submit_session_answer(
+    session_id: str,
+    background_tasks: BackgroundTasks,
+    payload: AnswerRequest = Body(default=AnswerRequest()),
+    supabase=Depends(get_supabase),
+    groq_service=Depends(get_groq_service),
+    whisper_service=Depends(get_whisper_service),
+    current_user: dict = Depends(require_session_owner),
+):
+    """The previous turn endpoint, which reads audio the client uploaded to
+    storage first.
+
+    Kept only so a browser running the previously deployed frontend does not
+    break the moment this ships -- the backend and the frontend deploy
+    independently. `/turn` replaces it; remove this once no client calls it.
+    """
+    try:
+        session = _live_session(supabase, session_id)
+        question = _open_question(supabase, session_id)
+
+        answer_text, audio_duration = "", None
+        if not payload.skip:
+            audio_bytes = await _download_answer_audio(session_id, question["question_number"])
+            if audio_bytes is not None:
+                with tempfile.TemporaryDirectory() as tmp:
+                    local = os.path.join(tmp, "answer.webm")
+                    with open(local, "wb") as f:
+                        f.write(audio_bytes)
+                    answer_text, audio_duration = whisper_service.transcribe(local)
+            else:
+                logger.info(f"No audio found for session {session_id} Q{question['question_number']}; treating as unanswered")
+
+        result = _advance_turn(
+            supabase, groq_service, background_tasks, session, question,
+            answer_text, audio_duration, audio_bytes=None,  # already in storage
+        )
+        # The old response shape, so an already-deployed client keeps working.
         return {
-            "evaluation": {
-                k: rubric[k]
-                for k in ("score", "feedback", "relevance", "specificity", "depth", "structure", "evidence_quotes", "gaps")
-            },
-            "next": next_payload,
-            "done": done,
-            "progress": progress_fraction(plan, asked, start, now, session["duration_seconds"]),
+            "evaluation": {"score": result["score"], "feedback": ""},
+            "next": result["next"],
+            "done": result["done"],
+            "progress": result["progress"],
         }
     except HTTPException:
         raise
@@ -732,6 +894,57 @@ def _pick_focus_area(brief_row: dict, asked_questions: list[dict]) -> dict | Non
     gaps = [a for a in pool if a["status"] == "gap"]
     partials = [a for a in pool if a["status"] == "partial"]
     return (gaps or partials or pool)[0]
+
+
+@router.get("/sessions/{session_id}/questions/{question_id}/audio")
+async def get_question_audio(
+    session_id: str,
+    question_id: str,
+    supabase=Depends(get_supabase),
+    tts_service=Depends(get_tts_service),
+    current_user: dict = Depends(require_session_owner),
+):
+    """The interviewer's voice for one question.
+
+    Returns 204 rather than an error when speech can't be produced: the
+    client falls back to the browser's own voice, and a failure here should
+    cost the nicer voice, never the question.
+
+    Served from the question id rather than from arbitrary text so this
+    cannot be used as a general-purpose TTS endpoint on someone else's Groq
+    quota -- the caller must own a session containing the question.
+    """
+    try:
+        uuid.UUID(session_id)
+        uuid.UUID(question_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid id format.")
+
+    rows = (
+        supabase.table("mock_interview_questions")
+        .select("question_text")
+        .eq("id", question_id)
+        .eq("session_id", session_id)
+        .limit(1)
+        .execute()
+    )
+    if not rows.data:
+        raise HTTPException(status_code=404, detail="Question not found")
+
+    try:
+        audio, mime = tts_service.speak(rows.data[0]["question_text"])
+    except TTSUnavailable as e:
+        logger.info(f"No TTS for question {question_id}: {e}")
+        return Response(status_code=204)
+
+    return Response(
+        content=audio,
+        media_type=mime,
+        # Question text never changes once written, so the same bytes are
+        # valid for as long as the session exists. Lets a replay or a reload
+        # skip the round trip entirely.
+        headers={"Cache-Control": "private, max-age=86400"},
+    )
 
 
 @router.post("/sessions/{session_id}/end")

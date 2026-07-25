@@ -39,4 +39,22 @@ class Settings:
     # every session runs in generic (resume-only) mode, not a startup error.
     TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
+    # Text-to-speech for the interviewer's questions. Same Groq key as
+    # everything else -- no new vendor or credential.
+    #
+    # Off by one env var rather than by deleting the route, because the
+    # frontend already falls back to the browser's own `speechSynthesis`
+    # when the server returns no audio: flipping this to false degrades the
+    # voice, it does not silence the interview. Useful if the model is not
+    # enabled on the account or its rate limit (250 req/min) becomes the
+    # binding constraint.
+    TTS_ENABLED = os.getenv("TTS_ENABLED", "true").lower() not in ("false", "0", "no")
+    TTS_MODEL = os.getenv("TTS_MODEL", "canopylabs/orpheus-v1-english")
+    TTS_VOICE = os.getenv("TTS_VOICE", "troy")
+    # Orpheus defaults to wav, which is uncompressed -- a 20-word question is
+    # a few hundred KB. Kept as the default because it is the documented one;
+    # override to a compressed format if bandwidth matters more than the
+    # extra decode step.
+    TTS_FORMAT = os.getenv("TTS_FORMAT", "wav")
+
 settings = Settings()

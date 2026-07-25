@@ -102,10 +102,30 @@ failure modes and trade-offs unprompted" does.
 
 ### Follow-ups are a separate axis
 
-A follow-up is *not* "a harder question." It is triggered when the evaluator
-returns **high relevance but low specificity or evidence** — the candidate is
-on-topic but vague. Cap: one follow-up per question (two in `technical`), and
-only when the phase has budget.
+A follow-up is *not* "a harder question." It probes a **claim**: `assess_turn`
+first names the concrete, checkable things the candidate asserted, then asks
+about the most load-bearing one that came without evidence, quoting it back.
+That is what produces "you said you led the Kafka migration — what broke
+first?" instead of "can you elaborate?".
+
+Cap: one follow-up per question (two in `technical`), never chained deeper
+than one level, and only when the phase has ≥30s of budget left. All four
+limits are enforced in code rather than requested in the prompt — the model is
+asked for a follow-up and its answer is discarded when the budget says no.
+
+### The opening question is a constant
+
+Every interview opens with the same fixed self-introduction. It is not
+generated, for four reasons:
+
+1. Real interviews open this way, so generating something else broke the one
+   convention every candidate has actually rehearsed.
+2. It put a Groq call on the critical path of session creation — a spinner for
+   a question that needed no thought.
+3. The intro answer is the richest grounding signal in the session. What
+   someone *chooses* to lead with, unprompted, tells you more than anything a
+   model can infer from the résumé alone.
+4. It buys prep its runway. Research takes ~45s; an introduction takes 60–90.
 
 ---
 
@@ -145,14 +165,80 @@ is three sequential LLM calls behind a normal endpoint.
 
 ### Transport
 
-**Discrete REST, one round-trip per turn.** `POST .../answer` returns the next
-question in the same response.
+**Discrete REST, one round-trip per turn.** `POST .../turn` carries the
+recorded audio up and brings the next question back in the same response.
 
 Not SSE: Railway closes SSE connections after 5 minutes idle and caps them at 15
 even with heartbeats. A 45-minute interview cannot live on one stream. Not
 WebSockets either — they would survive the timeout, but there is nothing to push;
 the candidate is speaking for minutes at a time and every state change is
-request-driven. Polling would be pure waste.
+request-driven. Polling would be pure waste. WebSockets only become necessary
+for true barge-in (the candidate interrupting the interviewer mid-question),
+which is deliberately not in scope.
+
+The audio goes **in the request body**. It used to go to Supabase storage from
+the browser, with the backend then re-downloading it — two retries, three-second
+sleeps between them, so a slow storage write bought up to six seconds of
+designed-in silence on the one path a candidate is sat waiting on. Archiving
+still happens, afterwards, where nobody is waiting.
+
+### The latency budget
+
+Turn-taking is what makes this feel like a conversation rather than a form, so
+what runs *while the candidate waits* is a design constraint, not an
+implementation detail:
+
+| on the critical path                    | off it                          |
+| --------------------------------------- | ------------------------------- |
+| transcription                            | the long-form rubric            |
+| `assess_turn` (score, claims, follow-up) | archiving the answer audio      |
+| generating a question — **only** when the bank has nothing for that phase | |
+
+Two consequences shape the rest of the design. **Serving a prepared question
+costs no LLM call at all**, so once prep lands, a turn is one Groq call.
+And **scoring is split**: the numeric score stays synchronous because the
+difficulty staircase reads it before choosing the next question, while
+evidence quotes, gaps and written feedback are computed after the response has
+gone out — nobody sees them until the report, and the interviewer does not need
+a rubric to know what to ask next. The background pass deliberately cannot
+overwrite the score, so the report can never disagree with the interview.
+
+### Turn-taking
+
+There is no "submit answer" button and no per-question countdown. The browser
+watches the microphone and ends the turn on ~1.6s of silence *after* sustained
+speech (`ui/lib/vad.ts`).
+
+The two failure modes are not symmetric — cutting someone off mid-thought loses
+their answer, waiting an extra second costs a pause — so everything is biased
+toward waiting. The threshold is calibrated against the room's measured noise
+floor rather than fixed (ambient level varies by orders of magnitude between a
+quiet room and a cafe); silence only counts once someone has actually spoken,
+so thinking before answering is not mistaken for finishing; and speech must be
+sustained past ~700ms, so a cough does not end a turn. Saying nothing at all
+ends the turn after 25s and is recorded as an unanswered question — that is how
+a candidate skips, and it needs no button.
+
+### Voice
+
+Questions are spoken, not just displayed. Hearing the question is most of what
+makes practice feel real: you process it at someone else's pace, you cannot
+re-read it while stalling, and you have to start talking without a script.
+
+Groq serves TTS on the same key as the chat and transcription calls, so this
+adds no vendor or credential. `GET .../questions/{id}/audio` returns **204
+rather than an error** when speech cannot be produced, and the client falls
+back to the browser's own `speechSynthesis`. The fallback lives on the client
+on purpose: a robot voice that starts instantly beats a good voice that arrives
+late, and only the client knows whether the audio it asked for has turned up.
+
+### Video is not recorded
+
+The camera preview stays — practising on camera is worth something — but
+nothing is recorded or uploaded. Nothing ever read it, the emotion-inference
+feature that would have is prohibited outright in a hiring context (see §8),
+and it cost a second MediaRecorder, an upload roughly ten times the size of the
+audio, and the bug surface that produced the stuck-spinner failure.
 
 ### Model split
 
@@ -185,13 +271,51 @@ since both integrations are already hard dependencies of deepagents.
 Both are env vars for the same reason `LLM_MODEL` already is: Groq
 decommissioned `llama3-8b-8192` out from under this codebase once already.
 
+### Structured output is not asked of the research agent
+
+Both of LangChain's structured-output strategies are unsound for a tool-using
+agent on Groq, and each was confirmed against a live deployment:
+
+- **ProviderStrategy (JSON mode) is impossible.** Groq rejects
+  `response_format={"type":"json_object"}` combined with bound tools outright.
+  Passing a bare Pydantic class selects this path, because LangChain's
+  auto-detection reads `model.profile["structured_output"]` and carves out
+  only Gemini's version of the same conflict.
+- **ToolStrategy is unreliable.** It binds the schema as a tool and forces
+  `tool_choice`, so the model must end a long tool-using trajectory by calling
+  one more tool. `gpt-oss-120b` instead wrote the answer as ordinary text and
+  Groq rejected the turn as `tool_use_failed` — discarding genuinely good
+  research on a serialisation technicality.
+
+So the agent is not asked to do both. **It ends in prose, and a separate,
+tool-free call converts that prose to the schema**, where JSON mode is legal.
+Serialisation becomes independently retryable: a malformed brief costs one
+cheap call rather than another minute of re-researching.
+
+`grounded` and `source_count` are then **derived** from the URLs actually
+present, never taken on the model's word — the prompt asks for honest
+provenance, but whether a question really came with a source is checkable, so
+it is checked.
+
 ### Failure is not allowed to block the interview
 
-Prep runs as a FastAPI background task. The session starts **immediately** with
-the warm-up question, which needs no research at all — it comes from the resume.
-By the time the candidate finishes answering it (~2 minutes) the brief is
-normally ready. If prep fails, times out, or Tavily is down, the session falls
-back to resume-only question generation and the candidate never sees an error.
+Prep runs as a FastAPI background task, in two stages with very different
+reliability:
+
+| stage             | cost                          | if it fails                          |
+| ----------------- | ----------------------------- | ------------------------------------ |
+| fit analysis      | one Groq call, ~2s, no external deps | research still runs           |
+| Tavily research   | minutes, network-dependent    | session downgrades to JD-grounded    |
+
+They are written separately, so the fit result is usable from the second
+question onward rather than waiting out the whole research run, and a research
+failure downgrades the interview instead of discarding everything. Prep only
+reports `failed` if **both** stages fail. It was previously one all-or-nothing
+call, which is exactly how a single serialisation bug wiped out a good brief in
+production.
+
+Meanwhile the session has already started on the fixed opener, which needs no
+research at all. The candidate never sees an error.
 
 ---
 
@@ -300,11 +424,23 @@ which is what issue #9 actually needs.
 alter table mock_interview_sessions
   add column target_role       text,
   add column company           text,
+  add column job_description   text,   -- optional; the strongest grounding signal
   add column duration_seconds  int  not null default 1800,
   add column status            text not null default 'in_progress',
   add column plan              jsonb,   -- phase budgets
   add column difficulty_tier   int  not null default 2,
   add column ended_at          timestamptz;
+
+-- resumes become a library rather than an append-only upload log
+alter table mock_interview_resumes
+  add column file_name  text,     -- file_path is storage-keyed, not displayable
+  add column label      text,
+  add column is_default boolean not null default false;
+
+-- one default per user, enforced by the database rather than by whichever
+-- code path happened to write last
+create unique index mock_interview_resumes_one_default_per_user
+  on mock_interview_resumes (user_id) where is_default;
 
 -- questions gain lineage, difficulty, and provenance
 alter table mock_interview_questions
@@ -329,11 +465,19 @@ create table mock_interview_resume_profiles (
 
 create table mock_interview_briefs (
   session_id uuid primary key references mock_interview_sessions(id) on delete cascade,
-  status     text not null default 'pending',  -- pending|ready|failed
-  brief      jsonb,
+  status     text not null default 'pending',  -- pending|running|ready|failed
+  brief      jsonb,   -- incl. focus_areas from the resume-vs-JD fit pass
   question_bank jsonb,
   created_at timestamptz not null default now()
 );
+
+-- the retired stress feature, dropped: inferring emotional state in a hiring
+-- context is prohibited outright by EU AI Act Art. 5(1)(f), the code went some
+-- time ago, and neither had ever held a row
+drop table mock_interview_stress_analysis;
+alter table mock_interview_reports
+  drop column average_stress_score,
+  drop column average_stress_level;
 ```
 
 Questions are now written **one at a time as they are asked**, not nine at once.
@@ -345,21 +489,39 @@ Questions are now written **one at a time as they are asked**, not nine at once.
 Replaces the `question_number`-indexed endpoints, which assumed a fixed list.
 
 ```
+GET    /interview/resumes                     the library (max 3)
+POST   /interview/upload-resume/{user_id}     409 + the list when at capacity
+PATCH  /interview/resumes/{id}/default
+DELETE /interview/resumes/{id}
+
 POST /interview/sessions
-     { resume_id, target_role, company?, duration_minutes }
-     → { session_id, question, phase, time_budget, progress }
+     { resume_id?, target_role, company?, job_description?, duration_minutes }
+     → { session_id, question, phase, progress }
 
 GET  /interview/sessions/{id}/state
      → current question, seconds remaining, phase, progress
 
-POST /interview/sessions/{id}/answer      (audio already uploaded to storage)
-     → { evaluation, next: question | null, done: bool }
+POST /interview/sessions/{id}/turn        multipart: audio (optional)
+     → { transcript, score, next: question | null, done, progress }
+
+GET  /interview/sessions/{id}/questions/{qid}/audio
+     → the question spoken; 204 when unavailable (client uses browser TTS)
 
 POST /interview/sessions/{id}/end          early exit
 GET  /interview/sessions/{id}/report
 ```
 
 One round-trip per turn. No polling, no long-lived connections.
+
+`resume_id` is optional — omitted, it resolves to the candidate's default, so a
+repeat session needs nothing but a role. Omitting `audio` on a turn means
+nothing was said, which is recorded as an unanswered question rather than an
+error: it is how a candidate skips, and it is indistinguishable at this layer
+from a recording that failed. Neither should end a session.
+
+`POST .../answer` still exists, deprecated, delegating to the same engine. The
+frontend and backend deploy independently, so removing it outright would break
+every browser still running the previously deployed frontend.
 
 ---
 
