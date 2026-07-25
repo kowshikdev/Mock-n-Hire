@@ -185,7 +185,7 @@ role-general. Respond with JSON of exactly this shape: {{"text": "..."}}"""
         payload = self._chat_json(
             system=f"You write {phase} interview questions calibrated to a specific difficulty level. You reply with JSON only.",
             user=prompt,
-            max_tokens=350,
+            max_tokens=3500,
         )
         text = (payload.get("text") or "").strip()
         if not text:
