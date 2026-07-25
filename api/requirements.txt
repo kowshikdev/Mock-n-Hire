@@ -1,6 +1,9 @@
 # Single merged backend -- both FastAPI apps (recruiter ranking in
 # api_service.py, candidate/interview routes in student/) now run as one
-# process/one Railway service. Requires Python 3.10+.
+# process/one Railway service. Requires Python 3.11+ (raised from 3.10 when
+# the prep agent's `deepagents` dependency was added -- it hard-requires
+# >=3.11. Pinned via api/.python-version, which Railway's Railpack builder
+# reads directly.
 #
 # Cleaned up from the originals: removed `python==3.10.11` (not a pip package),
 # `langchain`/`faiss-cpu` (imported nowhere), `keras`/`tf-keras`/`tensorflow`
@@ -38,3 +41,11 @@ python-docx               # DOCX extraction
 # cv2.VideoCapture for a duration probe, no GUI features -- headless is a
 # drop-in replacement, same `import cv2` namespace, no code changes needed.
 opencv-python-headless    # video duration probe in student/api/routes/stress.py
+
+# Prep agent (student/agents/) -- open-ended research before a session
+# starts, kept deliberately separate from the live interview loop. See
+# INTERVIEW_ARCHITECTURE.md section 3 for why deepagents belongs here and
+# nowhere else in this codebase.
+deepagents                # requires Python >=3.11 -- see railway.json note
+langchain-groq             # ChatGroq, resolved via init_chat_model("groq:...")
+tavily-python              # company-style question grounding, issue #11

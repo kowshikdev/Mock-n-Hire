@@ -25,4 +25,18 @@ class Settings:
     # There is no reason for the next one to require a deploy either.
     STT_MODEL = os.getenv("STT_MODEL", "whisper-large-v3-turbo")
 
+    # Model behind the prep agent (student/agents/prep_agent.py), not the
+    # live per-turn calls above. deepagents needs genuinely strong multi-step
+    # tool calling, which llama-3.1-8b-instant is not evaluated for. No Groq
+    # model appears on LangChain's own deepagents eval table at all -- an
+    # accepted risk, see INTERVIEW_ARCHITECTURE.md section 3 for why the
+    # fallback path (prep failure -> resume-only generation) is what makes
+    # that acceptable. gpt-oss-120b is the strongest tool-caller Groq
+    # currently serves.
+    AGENT_MODEL = os.getenv("AGENT_MODEL", "openai/gpt-oss-120b")
+
+    # Company-style question grounding (issue #11). Optional: unset means
+    # every session runs in generic (resume-only) mode, not a startup error.
+    TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+
 settings = Settings()
