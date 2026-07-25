@@ -1,29 +1,6 @@
 from pydantic import BaseModel
 from typing import List, Optional, Dict
 
-class Question(BaseModel):
-    text: str
-    category: str
-
-class StressAnalysis(BaseModel):
-    score: float
-    level: str
-    individual_scores: List[float]
-
-class NextQuestionResponse(BaseModel):
-    status: str
-    question: str
-    category: str
-    question_number: int
-    total_questions: int
-
-class AverageStressResponse(BaseModel):
-    status: str
-    session_id: str
-    average_stress: float
-    average_stress_level: str
-    individual_scores: List[float]
-
 class QuestionReport(BaseModel):
     question_number: int
     question_text: str
@@ -69,9 +46,3 @@ class UserSummaryResponse(BaseModel):
     # one that ever worked.
     weakest_question_types: Dict[str, CategoryPerformance]
     progress_over_time: Dict[str, float]
-
-class Session(BaseModel):
-    id: str
-    user_id: str
-    resume_id: str
-    created_at: str

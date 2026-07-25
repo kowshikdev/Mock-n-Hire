@@ -4,20 +4,15 @@ import logging
 from groq import Groq
 
 from student.config.settings import settings
+from student.core.difficulty import tier_prompt_context
 
 logger = logging.getLogger(__name__)
 
-# The interview's shape, as counts per category. Still fixed at nine for now --
-# INTERVIEW_ARCHITECTURE.md replaces this with a duration-driven agenda in
-# stage 2, at which point questions stop being generated in one batch at all.
-QUESTION_PLAN = [
-    ("technical", 3, "specific to the role and to skills the resume actually claims"),
-    ("hr", 3, "behavioural, probing culture fit and how they work with others"),
-    ("situational", 2, "scenario-based, testing judgement under ambiguity"),
-    ("surprise", 1, "unexpected but fair, testing adaptability rather than trivia"),
-]
-
-TOTAL_QUESTIONS = sum(count for _, count, _ in QUESTION_PLAN)
+# Follow-up cap per root question -- see INTERVIEW_ARCHITECTURE.md section 2.
+# Technical gets a second follow-up because a design question's depth is
+# often only visible two probes in; every other phase gets one.
+FOLLOWUP_LIMIT_BY_PHASE = {"technical": 2}
+DEFAULT_FOLLOWUP_LIMIT = 1
 
 
 class GroqService:
@@ -27,9 +22,8 @@ class GroqService:
     def _chat_json(self, system: str, user: str, max_tokens: int) -> dict:
         """One chat completion constrained to a JSON object, parsed.
 
-        Everything structured goes through here. The previous approach asked
-        for markdown and scraped it with regexes, which failed in three
-        separate ways -- see the call sites.
+        Everything structured goes through here rather than through markdown
+        scraped with regexes -- see git history for how that failed.
         """
         completion = self.client.chat.completions.create(
             messages=[
@@ -43,146 +37,218 @@ class GroqService:
         )
         return json.loads(completion.choices[0].message.content)
 
-    def generate_interview_questions(self, resume_text: str, profile: dict | None = None) -> list:
-        """Generate interview questions grounded in the candidate's resume.
+    # ------------------------------------------------------------------ #
+    # Question generation -- one at a time, just in time. There is no
+    # longer a single call that produces a whole interview: the session is
+    # duration-driven, so the number of questions isn't known until the
+    # session ends. See INTERVIEW_ARCHITECTURE.md sections 1-2.
+    # ------------------------------------------------------------------ #
 
-        Previously this asked for markdown headings and numbered lists, then
-        parsed them by hand. Three things were wrong with that:
-
-        1. The prompt specified "- **Technical:**" (leading hyphen) while the
-           parser matched `line.startswith("**Technical:**")`. A model that
-           followed the prompt exactly produced *zero* parsed questions; it
-           only ever worked because the model usually dropped the hyphen.
-        2. `max_tokens=500` for nine questions plus headings is close enough
-           to the limit that a verbose run got truncated mid-list, silently
-           yielding a short interview.
-        3. The cleanup regex `r"^\\d+\\.\\s*|\\d+\\s"` left its second branch
-           unanchored, so it deleted *any* digit followed by whitespace
-           anywhere in the text: "5 years of experience" came out as "years
-           of experience".
-
-        JSON mode removes all three. Output is validated before it is used.
-        """
-        spec = "\n".join(
-            f'- "{category}": {count} question(s), {guidance}'
-            for category, count, guidance in QUESTION_PLAN
-        )
-
-        # A structured profile beats raw resume text: the model spends its
-        # attention on which project to ask about rather than on working out
-        # where the experience section ends. Falls back to raw text when
-        # parsing failed, so a bad parse degrades instead of blocking.
-        candidate_context = ""
-        if profile:
-            from student.core.resume_parser import profile_to_prompt_context
-
-            candidate_context = profile_to_prompt_context(profile)
-        if not candidate_context:
-            candidate_context = resume_text[:12000]
-
-        prompt = f"""Generate a mock interview for this candidate, for a Software Engineer role.
+    def generate_first_question(self, candidate_context: str, target_role: str) -> str:
+        """The warm-up question. Resume-derived only, deliberately -- this
+        has to be answerable the instant a session is created, before the
+        prep agent (which can take minutes) has had a chance to run."""
+        prompt = f"""Write ONE warm-up interview question for a {target_role} candidate.
 
 Candidate:
 \"\"\"
-{candidate_context}
+{candidate_context or "(no resume details available)"}
 \"\"\"
 
-Produce exactly {TOTAL_QUESTIONS} questions:
-{spec}
+It should invite them to walk through their background, but anchored to
+something specific on their resume -- a notable project, role, or
+transition -- not a generic "tell me about yourself".
 
-Ground every question in something the resume actually says -- name the
-project, employer, or technology you are asking about. Do not ask about
-skills the candidate has not claimed.
+Respond with JSON of exactly this shape: {{"text": "..."}}"""
 
-Respond with JSON of exactly this shape and nothing else:
-{{"questions": [{{"text": "...", "category": "technical"}}]}}
+        payload = self._chat_json(
+            system="You write warm, specific interview openers. You reply with JSON only.",
+            user=prompt,
+            max_tokens=300,
+        )
+        text = (payload.get("text") or "").strip()
+        if not text:
+            raise Exception("Model returned an empty warm-up question")
+        return text
 
-`category` must be one of: {", ".join(c for c, _, _ in QUESTION_PLAN)}."""
+    def generate_next_question(
+        self,
+        candidate_context: str,
+        target_role: str,
+        phase: str,
+        difficulty_tier: int,
+        asked_texts: list[str],
+        seed: dict | None = None,
+    ) -> dict:
+        """One phase-appropriate question.
 
-        try:
-            payload = self._chat_json(
-                system="You write grounded, resume-specific interview questions. You reply with JSON only.",
-                user=prompt,
-                # ~9 questions of real substance. The old 500 was a truncation
-                # risk; this leaves headroom without being wasteful.
-                max_tokens=2000,
-            )
-        except Exception as e:
-            logger.error(f"Question generation failed: {e}")
-            raise Exception(f"Error generating interview questions: {e}")
+        If `seed` is given -- a QuestionSeed from the prep agent's brief --
+        it is served directly rather than re-generated. It is already an
+        original question the prep agent wrote to match a real pattern it
+        found (see student/agents/schemas.py); running it through another
+        LLM pass would only risk drifting it away from what it was grounded
+        in for no benefit.
+        """
+        if seed:
+            return {
+                "text": seed["text"],
+                "provenance": {
+                    "source_count": seed.get("source_count", 0),
+                    "source_urls": seed.get("source_urls", []),
+                    "date_range": seed.get("date_range", []),
+                    "theme": seed.get("theme", ""),
+                },
+            }
 
-        valid_categories = {c for c, _, _ in QUESTION_PLAN}
-        questions = []
-        for item in payload.get("questions", []):
-            text = (item.get("text") or "").strip()
-            category = (item.get("category") or "").strip().lower()
-            if not text:
-                continue
-            if category not in valid_categories:
-                category = "technical"
-            questions.append({"text": text, "category": category})
+        avoid = "\n".join(f"- {t}" for t in asked_texts[-10:]) or "(none yet)"
+        prompt = f"""Write ONE {phase} interview question for a {target_role} candidate.
 
-        # A session with one or two questions is worse than a clear failure:
-        # the candidate finishes in 90 seconds and gets a report built on
-        # nothing. Fail here so the caller can surface a real error.
-        if len(questions) < TOTAL_QUESTIONS:
-            raise Exception(
-                f"Model returned {len(questions)} usable questions, expected {TOTAL_QUESTIONS}"
-            )
+Difficulty: {tier_prompt_context(difficulty_tier)}
 
-        return questions[:TOTAL_QUESTIONS]
+Candidate:
+\"\"\"
+{candidate_context or "(no resume details available)"}
+\"\"\"
 
-    def evaluate_answer(self, question_text: str, answer_text: str) -> dict:
-        """Score one answer and explain the score.
+Already asked this session -- do not repeat or closely resemble any of these:
+{avoid}
 
-        Was `re.search(r"Score: (\\d+)")` over free prose, which raised
-        whenever the model phrased its reply even slightly differently -- and
-        that exception propagated as a 500 out of /submit-answer, losing the
-        answer entirely rather than degrading.
+Ground the question in the candidate's actual background where the phase
+allows it (technical/behavioral); situational and closing questions may be
+role-general. Respond with JSON of exactly this shape: {{"text": "..."}}"""
+
+        payload = self._chat_json(
+            system=f"You write {phase} interview questions calibrated to a specific difficulty level. You reply with JSON only.",
+            user=prompt,
+            max_tokens=350,
+        )
+        text = (payload.get("text") or "").strip()
+        if not text:
+            raise Exception(f"Model returned an empty {phase} question")
+        return {"text": text, "provenance": None}
+
+    # ------------------------------------------------------------------ #
+    # Evaluation -- one structured rubric per answer, with the follow-up
+    # decision made in the same call rather than a second round trip.
+    # ------------------------------------------------------------------ #
+
+    def evaluate_answer(
+        self,
+        question_text: str,
+        answer_text: str,
+        phase: str,
+        followups_used: int,
+        is_followup: bool,
+    ) -> dict:
+        """Score an answer on relevance/specificity/depth/structure, and
+        decide whether it earns a follow-up.
+
+        A follow-up is judged, not just permitted: recommending one is only
+        appropriate when the candidate was relevant but vague -- on-topic
+        with low specificity or evidence, not simply "this could go
+        deeper". A follow-up itself never spawns another (is_followup=True
+        forces followup_recommended=False), keeping the chain one level
+        deep regardless of what the model returns.
         """
         answer_text = (answer_text or "").strip()
         if not answer_text:
-            return {
-                "score": 0,
-                "feedback": "No answer was recorded for this question.",
-            }
+            return _empty_answer_rubric()
+
+        limit = FOLLOWUP_LIMIT_BY_PHASE.get(phase, DEFAULT_FOLLOWUP_LIMIT)
+        can_followup = (not is_followup) and followups_used < limit
+
+        followup_instruction = (
+            "Recommend a follow-up ONLY if the candidate was relevant but vague: "
+            "on-topic with low specificity or thin evidence. Do not recommend one "
+            "just because the topic could theoretically go deeper -- a strong, "
+            "specific answer should not get a follow-up."
+            if can_followup
+            else "Do not recommend a follow-up regardless of the answer -- the "
+                 "budget for this question is already used."
+        )
 
         prompt = f"""Evaluate this interview answer.
 
 Question:
 {question_text}
 
-Answer (transcribed from speech, so ignore punctuation and filler):
+Candidate's answer (transcribed from speech -- ignore punctuation and filler):
 {answer_text}
 
-Judge relevance to the question, specificity (concrete examples, numbers,
-named tools), depth of reasoning, and structure. Reward evidence; penalise
-confident vagueness.
+Score 0-10 on each of:
+- relevance: does it actually address the question
+- specificity: concrete examples, numbers, named tools/technologies
+- depth: real reasoning, not just facts recited
+- structure: clarity and organization
+
+Then give an overall score 0-10 (your holistic judgement, not necessarily
+the average of the four).
+
+Quote up to 3 short phrases from their actual answer that support your
+judgement (evidence_quotes). List real gaps, if any (gaps) -- claims made
+without support, or parts of the question left unaddressed.
+
+{followup_instruction}
 
 Respond with JSON of exactly this shape:
-{{"score": 7, "feedback": "two or three sentences, citing what they actually said"}}
-
-`score` is an integer from 0 to 10."""
+{{"relevance": 0, "specificity": 0, "depth": 0, "structure": 0, "score": 0,
+  "evidence_quotes": ["..."], "gaps": ["..."],
+  "feedback": "two or three sentences, citing what they actually said",
+  "followup_recommended": false, "followup_question": null}}"""
 
         try:
             payload = self._chat_json(
                 system="You are a fair, specific interview assessor. You reply with JSON only.",
                 user=prompt,
-                max_tokens=400,
+                max_tokens=600,
             )
-            score = int(payload.get("score", 0))
-            feedback = (payload.get("feedback") or "").strip()
+            return _normalise_rubric(payload, can_followup=can_followup)
         except Exception as e:
-            # Degrade instead of 500-ing: the transcript is the valuable part
-            # and it is already captured by the caller.
             logger.error(f"Answer evaluation failed: {e}")
             return {
+                **_empty_answer_rubric(),
                 "score": None,
                 "feedback": "This answer could not be scored automatically.",
             }
 
-        score = max(0, min(10, score))
-        return {
-            "score": score,
-            "feedback": feedback or "No feedback was returned for this answer.",
-        }
+
+def _clamp10(value) -> int:
+    try:
+        return max(0, min(10, int(value)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _normalise_rubric(payload: dict, can_followup: bool) -> dict:
+    followup_recommended = can_followup and bool(payload.get("followup_recommended"))
+    followup_question = (payload.get("followup_question") or "").strip() or None
+    if not followup_recommended:
+        followup_question = None
+
+    return {
+        "relevance": _clamp10(payload.get("relevance")),
+        "specificity": _clamp10(payload.get("specificity")),
+        "depth": _clamp10(payload.get("depth")),
+        "structure": _clamp10(payload.get("structure")),
+        "score": _clamp10(payload.get("score")),
+        "evidence_quotes": [q for q in (payload.get("evidence_quotes") or []) if isinstance(q, str)][:3],
+        "gaps": [g for g in (payload.get("gaps") or []) if isinstance(g, str)][:5],
+        "feedback": (payload.get("feedback") or "").strip() or "No feedback was returned for this answer.",
+        "followup_recommended": followup_recommended,
+        "followup_question": followup_question,
+    }
+
+
+def _empty_answer_rubric() -> dict:
+    return {
+        "relevance": 0,
+        "specificity": 0,
+        "depth": 0,
+        "structure": 0,
+        "score": 0,
+        "evidence_quotes": [],
+        "gaps": ["No answer was given."],
+        "feedback": "No answer was recorded for this question.",
+        "followup_recommended": False,
+        "followup_question": None,
+    }

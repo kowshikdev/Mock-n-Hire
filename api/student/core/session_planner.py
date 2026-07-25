@@ -108,6 +108,15 @@ def next_slot(
     return None
 
 
+def phase_remaining_seconds(plan: list[dict], asked: list[AskedQuestion], phase_name: str) -> float:
+    """Budget left in a specific phase -- used to decide whether a follow-up
+    can be afforded before it is generated, separately from next_slot()'s
+    walk across all phases in order."""
+    spent = sum(q.spent_seconds() for q in asked if q.phase == phase_name)
+    budget = next((p["budget_seconds"] for p in plan if p["phase"] == phase_name), 0.0)
+    return budget - spent
+
+
 def progress_fraction(
     plan: list[dict], asked: list[AskedQuestion], session_start: datetime, now: datetime, duration_seconds: int
 ) -> float:
