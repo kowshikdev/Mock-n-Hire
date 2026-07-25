@@ -43,7 +43,7 @@ class GroqService:
         )
         return json.loads(completion.choices[0].message.content)
 
-    def generate_interview_questions(self, resume_text: str) -> list:
+    def generate_interview_questions(self, resume_text: str, profile: dict | None = None) -> list:
         """Generate interview questions grounded in the candidate's resume.
 
         Previously this asked for markdown headings and numbered lists, then
@@ -68,11 +68,23 @@ class GroqService:
             for category, count, guidance in QUESTION_PLAN
         )
 
+        # A structured profile beats raw resume text: the model spends its
+        # attention on which project to ask about rather than on working out
+        # where the experience section ends. Falls back to raw text when
+        # parsing failed, so a bad parse degrades instead of blocking.
+        candidate_context = ""
+        if profile:
+            from student.core.resume_parser import profile_to_prompt_context
+
+            candidate_context = profile_to_prompt_context(profile)
+        if not candidate_context:
+            candidate_context = resume_text[:12000]
+
         prompt = f"""Generate a mock interview for this candidate, for a Software Engineer role.
 
-Resume:
+Candidate:
 \"\"\"
-{resume_text[:12000]}
+{candidate_context}
 \"\"\"
 
 Produce exactly {TOTAL_QUESTIONS} questions:

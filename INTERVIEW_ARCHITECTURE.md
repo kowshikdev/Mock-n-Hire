@@ -165,7 +165,22 @@ So there are two model env vars:
 
 - `LLM_MODEL` — fast per-turn work (evaluation, question phrasing). Default
   `llama-3.1-8b-instant`.
-- `AGENT_MODEL` — the prep agent only. Needs strong tool calling.
+- `AGENT_MODEL` — the prep agent only. Needs strong tool calling. Default
+  `openai/gpt-oss-120b`.
+
+**Decision: stay on Groq, accept the risk.** No Groq model appears on
+LangChain's deepagents eval table, so the prep agent's planning quality is
+genuinely unverified — `gemini-3.5-flash` sits at 82% overall / 90% tool use
+there and would be the safer pick. Staying single-provider was chosen anyway
+to keep one key and one billing surface. `openai/gpt-oss-120b` is the
+strongest tool-caller Groq currently serves (Kimi K2 is *not* in their
+catalog, despite being the open-weight family LangChain recommends).
+
+This is exactly why prep failure has to be survivable. If the agent turns out
+to plan badly on this model, the visible effect is more sessions falling back
+to resume-only grounding — not broken interviews. If that rate is high,
+switching `AGENT_MODEL` to a Gemini or Anthropic string is a one-line change,
+since both integrations are already hard dependencies of deepagents.
 
 Both are env vars for the same reason `LLM_MODEL` already is: Groq
 decommissioned `llama3-8b-8192` out from under this codebase once already.
@@ -221,14 +236,42 @@ each with a fix.
 
 | Problem                                                                                  | Fix                                                                          |
 | ---------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| Two-column resumes interleave into nonsense, because `"text"` mode reads in raw stream order | `get_text("blocks")`, sorted by column then y-position                    |
+| Two-column resumes interleave into nonsense, because `"text"` mode reads in raw stream order | Gutter detection over **line** bboxes (see below)                        |
 | Scanned/image PDFs silently extract to `""` and the candidate gets an interview about nothing | Detect near-empty extraction, fail loudly with a real message            |
 | No structure — every downstream call re-derives sections from prose                       | One structured-extraction pass into a typed `ResumeProfile`                 |
 | Re-parsed on every single call                                                            | Persist to `mock_interview_resume_profiles`, parse once per resume           |
 | Recruiter side truncates to `resume_text[:2000]`, cutting most resumes in half             | Feed the structured profile instead; no truncation needed                    |
 | Student side is PDF-only while the recruiter side already handles DOCX                    | Share one parser across both                                                 |
 
-The `ResumeProfile` shape:
+### Recovering reading order
+
+Worth recording, because the obvious fix does not work: sorting `get_text("blocks")`
+by column is **not** enough. PyMuPDF merges text sharing a baseline into one
+block, so on a two-column resume a single block comes back holding *both*
+columns for that row — `'SKILLS\nEXPERIENCE'`. The interleaving is inside the
+block, and no amount of block-level sorting separates it again.
+
+The bboxes that distinguish the columns only exist one level down, on lines.
+So extraction works on lines, and:
+
+1. Scans candidate x positions across the middle 22–78% of the page, counting
+   how many lines straddle each.
+2. Treats positions crossed by ≤15% of lines as gutter candidates. The
+   allowance matters: nearly every two-column resume has a full-width name
+   header or section banner, and requiring a completely clear channel lets one
+   wide header suppress column detection for the whole page.
+3. Picks the candidate run that best **balances** content either side, with
+   width only as a tiebreak. Choosing the widest run instead selects the empty
+   right margin beyond the longest line, which splits the page into
+   "everything" and "nothing".
+4. Splits the page into horizontal bands at lines that genuinely span the
+   gutter, and reads left-then-right within each band — so a mid-page
+   full-width heading stays attached to the columns it introduces.
+
+Single-column pages find no balanced gutter and fall through to plain
+top-to-bottom ordering, unchanged.
+
+### The `ResumeProfile` shape
 
 ```python
 {

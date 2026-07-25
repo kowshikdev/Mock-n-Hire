@@ -5,12 +5,11 @@ import json
 import os
 import zipfile
 import time
-from pdfminer.high_level import extract_text
-import docx
 from dotenv import load_dotenv
 from sentence_transformers import SentenceTransformer
 from supabase import create_client
-from storage_utils import upload_resume_info_to_db 
+from storage_utils import upload_resume_info_to_db
+from resume_text import extract_resume_text, UnreadableResume, SUPPORTED_EXTENSIONS
 
 
 load_dotenv()
@@ -53,46 +52,43 @@ def extract_zip(zip_path: str, extract_to: str):
     _extract(zip_path, extract_to)
 
 
-import os
-import docx
-from pdfminer.high_level import extract_text
-
 def read_resumes(folder_path: str):
+    """Read every resume in a folder into text.
+
+    Extraction moved to the shared resume_text module, which the candidate
+    side uses too. Two wins beyond not maintaining it twice: multi-column
+    resumes no longer interleave their sidebar into the main column, and DOCX
+    files that lay everything out in a borderless table stop extracting as an
+    empty string (python-docx does not surface table text through
+    `.paragraphs`, which is all the old code read).
+    """
     resumes = []
 
     for root, _, files in os.walk(folder_path):
         for file in files:
-            # ✅ Only allow PDF and DOCX
-            if not file.lower().endswith((".pdf", ".docx")):
+            if not file.lower().endswith(SUPPORTED_EXTENSIONS):
                 print(f"⚠️ Skipping unsupported file: {file}")
                 continue
 
-            # ✅ Absolute path to file
             path = os.path.join(root, file)
 
-            # ✅ Try to unlock permission if needed (Windows fix)
+            # Windows: files unzipped from some archives land read-only.
             try:
                 os.chmod(path, 0o644)
             except Exception as e:
                 print(f"⚠️ chmod failed for {file}: {e}")
 
-            # ✅ Try to read the file
             try:
-                if file.lower().endswith(".pdf"):
-                    text = extract_text(path)
-                elif file.lower().endswith(".docx"):
-                    doc = docx.Document(path)
-                    text = "\n".join(p.text for p in doc.paragraphs)
-
-                if text.strip():
-                    resumes.append({
-                        "filename": os.path.basename(file),  # Clean file name
-                        "text": text,
-                        "path": path
-                    })
-                    print(f"✅ Loaded resume: {file}")
-                else:
-                    print(f"⚠️ Skipped empty resume: {file}")
+                with open(path, "rb") as fh:
+                    text = extract_resume_text(fh.read(), file)
+                resumes.append({
+                    "filename": os.path.basename(file),
+                    "text": text,
+                    "path": path,
+                })
+                print(f"✅ Loaded resume: {file}")
+            except UnreadableResume as e:
+                print(f"⚠️ Skipped unreadable resume {file}: {e}")
             except Exception as e:
                 print(f"❌ Failed to read {file}: {e}")
 

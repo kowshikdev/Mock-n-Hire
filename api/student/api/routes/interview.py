@@ -1,9 +1,15 @@
 from fastapi import APIRouter, HTTPException, Depends, Body, File, UploadFile
 from pydantic import BaseModel
-from student.api.dependencies import get_supabase, get_groq_service, get_whisper_service, get_report_service
+from student.api.dependencies import (
+    get_supabase,
+    get_groq_service,
+    get_whisper_service,
+    get_report_service,
+    get_resume_parser,
+)
 from student.api.auth import get_current_user, require_self, require_session_owner
 from student.utils.supabase_utils import upload_file, download_file
-from student.utils.pdf_utils import extract_text_from_pdf
+from resume_text import extract_resume_text, UnreadableResume, SUPPORTED_EXTENSIONS
 from student.models.schemas import Question, NextQuestionResponse, FinalReportResponse, UserSummaryResponse
 import os
 import tempfile
@@ -61,21 +67,30 @@ async def upload_resume(mock_user_id: str, file: UploadFile = File(...), supabas
             logger.error(f"Failed to upsert user {mock_user_id}: {str(e)}")
             raise HTTPException(status_code=500, detail="Failed to ensure user exists in system")
 
-        if not file.filename.endswith(".pdf"):
+        # DOCX was rejected here while the recruiter path had accepted it all
+        # along -- a candidate whose resume was a Word document simply could
+        # not use the product.
+        if not (file.filename or "").lower().endswith(SUPPORTED_EXTENSIONS):
             logger.warning(f"Invalid file format for user {mock_user_id}: {file.filename}")
-            raise HTTPException(status_code=400, detail="Only PDF files are supported")
+            raise HTTPException(status_code=400, detail="Please upload a PDF or DOCX resume.")
 
-        # The upload used to extract_text_from_pdf() here and throw the result
-        # away -- a full PDF parse per upload for nothing, then a rewind and a
-        # second read of the same bytes. The text is extracted where it is
-        # actually used, in generate-questions.
+        # Validate readability *before* storing. Uploading a scan, then
+        # failing at generate-questions, left an orphaned file and a row
+        # pointing at a resume the product can't use.
+        file_content = file.file.read()
+        try:
+            extract_resume_text(file_content, file.filename)
+        except UnreadableResume as e:
+            raise HTTPException(status_code=422, detail=str(e))
+
         timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
         base_filename = file.filename.rsplit(".", 1)[0]
         file_extension = file.filename.rsplit(".", 1)[1]
         unique_filename = f"{base_filename}_{timestamp}.{file_extension}"
         file_path = f"{mock_user_id}/{unique_filename}"
-        file.file.seek(0)
-        upload_file("mock.interview.resumes", file_path, file.file.read())
+        # Reuse the bytes already read for validation instead of seek(0) and a
+        # second full read of the upload.
+        upload_file("mock.interview.resumes", file_path, file_content)
 
         response = supabase.table("mock_interview_resumes").insert({
             "user_id": mock_user_id,
@@ -101,7 +116,7 @@ async def upload_resume(mock_user_id: str, file: UploadFile = File(...), supabas
         raise HTTPException(status_code=500, detail=f"Error uploading resume: {str(e)}")
 
 @router.post("/generate-questions/{mock_user_id}/{resume_id}")
-async def generate_questions(mock_user_id: str, resume_id: str, supabase=Depends(get_supabase), groq_service=Depends(get_groq_service), current_user: dict = Depends(require_self)):
+async def generate_questions(mock_user_id: str, resume_id: str, supabase=Depends(get_supabase), groq_service=Depends(get_groq_service), resume_parser=Depends(get_resume_parser), current_user: dict = Depends(require_self)):
     try:
         try:
             uuid.UUID(mock_user_id)
@@ -125,24 +140,21 @@ async def generate_questions(mock_user_id: str, resume_id: str, supabase=Depends
         file_path = resume_data.data[0]["file_path"]
         file_response = download_file("mock.interview.resumes", file_path)
 
-        # extract_text_from_pdf works on bytes. The previous version still
-        # wrote those bytes to a hardcoded "temp.pdf" in the process working
-        # directory, parsed from memory anyway, then deleted the file -- so
-        # two concurrent sessions raced over one filename, and whichever
-        # finished first deleted the other's file out from under it.
-        resume_text = extract_text_from_pdf(file_response)
+        # Extraction works on bytes. The previous version still wrote those
+        # bytes to a hardcoded "temp.pdf" in the process working directory,
+        # parsed from memory anyway, then deleted the file -- so two
+        # concurrent sessions raced over one filename, and whichever finished
+        # first deleted the other's out from under it.
+        try:
+            resume_text = extract_resume_text(file_response, file_path)
+        except UnreadableResume as e:
+            raise HTTPException(status_code=422, detail=str(e))
 
-        if len(resume_text.strip()) < 100:
-            # Almost always a scanned or image-only PDF. Left unchecked this
-            # generated an "interview" from an empty string: nine generic
-            # questions with no connection to the candidate at all.
-            raise HTTPException(
-                status_code=422,
-                detail="We couldn't read any text from that PDF. If it's a scan or an "
-                       "image export, please upload a text-based PDF instead.",
-            )
+        # Parsed once per resume and cached, so a candidate running a second
+        # session on the same file does not pay for this again.
+        profile = resume_parser.get_profile(resume_id, resume_text)
 
-        questions = groq_service.generate_interview_questions(resume_text)
+        questions = groq_service.generate_interview_questions(resume_text, profile=profile)
 
         session_response = supabase.table("mock_interview_sessions").insert({
             "user_id": mock_user_id,
