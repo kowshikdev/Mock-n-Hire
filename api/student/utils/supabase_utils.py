@@ -11,3 +11,7 @@ def upload_file(bucket: str, file_path: str, file_content: bytes):
 def download_file(bucket: str, file_path: str):
     """Download a file from Supabase storage."""
     return supabase.storage.from_(bucket).download(file_path)
+
+def remove_file(bucket: str, file_path: str):
+    """Delete a file from Supabase storage."""
+    return supabase.storage.from_(bucket).remove([file_path])

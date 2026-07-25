@@ -8,16 +8,19 @@ from student.api.dependencies import (
     get_resume_parser,
 )
 from student.api.auth import get_current_user, require_self, require_session_owner
-from student.utils.supabase_utils import upload_file, download_file
+from student.utils.supabase_utils import upload_file, download_file, remove_file
 from resume_text import extract_resume_text, UnreadableResume, SUPPORTED_EXTENSIONS
+from student.core import resume_library
 from student.core.resume_parser import profile_to_prompt_context
 from student.core.session_planner import (
     build_plan,
+    expected_question_counts,
     next_slot,
     phase_remaining_seconds,
     progress_fraction,
     AskedQuestion,
     GRACE_FACTOR,
+    OPENING_QUESTION,
 )
 from student.core import difficulty
 from student.core.prep_service import start_prep
@@ -59,8 +62,32 @@ async def test_supabase(supabase=Depends(get_supabase), current_user: dict = Dep
         raise HTTPException(status_code=500, detail=f"Supabase error: {str(e)}")
 
 
+def _parse_profile_in_background(resume_parser, resume_id: str, resume_text: str) -> None:
+    """Warm the resume-profile cache right after upload.
+
+    Parsing is a multi-second LLM pass. Doing it here means starting an
+    interview later is a cache hit rather than a download plus a parse on the
+    critical path, and the candidate is typing a role and duration while it
+    runs. Failures are swallowed: `create_session` still has the parse path,
+    so the worst case is the latency this exists to avoid, not a broken
+    upload.
+    """
+    try:
+        resume_parser.get_profile(resume_id, resume_text)
+        logger.info(f"Resume profile warmed for {resume_id}")
+    except Exception as e:
+        logger.warning(f"Background resume parse failed for {resume_id}: {e}")
+
+
 @router.post("/upload-resume/{mock_user_id}")
-async def upload_resume(mock_user_id: str, file: UploadFile = File(...), supabase=Depends(get_supabase), current_user: dict = Depends(require_self)):
+async def upload_resume(
+    mock_user_id: str,
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    supabase=Depends(get_supabase),
+    resume_parser=Depends(get_resume_parser),
+    current_user: dict = Depends(require_self),
+):
     try:
         try:
             uuid.UUID(mock_user_id)
@@ -84,9 +111,23 @@ async def upload_resume(mock_user_id: str, file: UploadFile = File(...), supabas
 
         file_content = file.file.read()
         try:
-            extract_resume_text(file_content, file.filename)
+            resume_text = extract_resume_text(file_content, file.filename)
         except UnreadableResume as e:
             raise HTTPException(status_code=422, detail=str(e))
+
+        # Checked before the upload, not after: storing the object first and
+        # then rejecting the row would leave an orphan in the bucket that
+        # nothing references and nothing cleans up.
+        existing = resume_library.list_resumes(supabase, mock_user_id)
+        if len(existing) >= resume_library.MAX_RESUMES:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": f"You can keep up to {resume_library.MAX_RESUMES} resumes. "
+                               "Delete one before uploading another.",
+                    "resumes": existing,
+                },
+            )
 
         timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
         base_filename = file.filename.rsplit(".", 1)[0]
@@ -95,23 +136,94 @@ async def upload_resume(mock_user_id: str, file: UploadFile = File(...), supabas
         file_path = f"{mock_user_id}/{unique_filename}"
         upload_file("mock.interview.resumes", file_path, file_content)
 
-        response = supabase.table("mock_interview_resumes").insert({
-            "user_id": mock_user_id,
-            "file_path": file_path
-        }).execute()
+        try:
+            resume = resume_library.register_upload(
+                supabase, mock_user_id, file_path, file.filename
+            )
+        except resume_library.ResumeLimitReached as e:
+            # Lost a race with a concurrent upload between the check above and
+            # here. The object is already in storage, so remove it rather than
+            # leaving it orphaned.
+            try:
+                remove_file("mock.interview.resumes", file_path)
+            except Exception as cleanup_error:
+                logger.warning(f"Could not clean up {file_path} after limit race: {cleanup_error}")
+            raise HTTPException(status_code=409, detail={"message": str(e), "resumes": e.resumes})
 
-        resume_id = response.data[0]["id"]
-        logger.info(f"Resume uploaded for user {mock_user_id}: {file_path}, resume_id: {resume_id}")
+        background_tasks.add_task(
+            _parse_profile_in_background, resume_parser, resume["id"], resume_text
+        )
+
+        logger.info(f"Resume uploaded for user {mock_user_id}: {file_path}, resume_id: {resume['id']}")
         return {
             "status": "Resume uploaded",
-            "resume_id": resume_id,
-            "user_id": mock_user_id
+            "resume_id": resume["id"],
+            "user_id": mock_user_id,
+            "file_name": resume["file_name"],
+            "is_default": resume["is_default"],
         }
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Error uploading resume for user {mock_user_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error uploading resume: {str(e)}")
+
+
+# --------------------------------------------------------------------- #
+# Resume library. A candidate keeps up to three resumes and picks a default,
+# so starting an interview no longer requires uploading the same CV again.
+# --------------------------------------------------------------------- #
+
+
+@router.get("/resumes")
+async def get_resumes(supabase=Depends(get_supabase), current_user: dict = Depends(get_current_user)):
+    return {
+        "resumes": resume_library.list_resumes(supabase, current_user["user_id"]),
+        "max_resumes": resume_library.MAX_RESUMES,
+    }
+
+
+@router.patch("/resumes/{resume_id}/default")
+async def set_default_resume(
+    resume_id: str,
+    supabase=Depends(get_supabase),
+    current_user: dict = Depends(get_current_user),
+):
+    try:
+        uuid.UUID(resume_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid resume_id format.")
+    try:
+        resume_library.set_default(supabase, current_user["user_id"], resume_id)
+    except resume_library.ResumeNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"resumes": resume_library.list_resumes(supabase, current_user["user_id"])}
+
+
+@router.delete("/resumes/{resume_id}")
+async def delete_resume(
+    resume_id: str,
+    supabase=Depends(get_supabase),
+    current_user: dict = Depends(get_current_user),
+):
+    try:
+        uuid.UUID(resume_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid resume_id format.")
+    try:
+        deleted = resume_library.delete_resume(supabase, current_user["user_id"], resume_id)
+    except resume_library.ResumeNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    # Storage is cleaned up after the row is gone, and a failure here is
+    # logged rather than raised: the candidate's library is already correct,
+    # and failing the request would imply otherwise.
+    try:
+        remove_file("mock.interview.resumes", deleted["file_path"])
+    except Exception as e:
+        logger.warning(f"Deleted resume row {resume_id} but could not remove {deleted['file_path']}: {e}")
+
+    return {"resumes": resume_library.list_resumes(supabase, current_user["user_id"])}
 
 
 # --------------------------------------------------------------------- #
@@ -123,9 +235,15 @@ async def upload_resume(mock_user_id: str, file: UploadFile = File(...), supabas
 # --------------------------------------------------------------------- #
 
 class CreateSessionRequest(BaseModel):
-    resume_id: str
+    # Optional: falls back to the candidate's default resume, so a repeat
+    # session needs nothing but a role.
+    resume_id: str | None = None
     target_role: str
     company: str | None = None
+    # Optional, and the strongest grounding signal there is when present -- a
+    # role title implies a stack, a posting names it. See
+    # groq_service.analyse_fit.
+    job_description: str | None = None
     duration_minutes: int = Field(ge=10, le=60)
 
 
@@ -205,26 +323,31 @@ async def create_session(
     current_user: dict = Depends(get_current_user),
 ):
     try:
+        if payload.resume_id:
+            try:
+                uuid.UUID(payload.resume_id)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid resume_id format.")
+
         try:
-            uuid.UUID(payload.resume_id)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid resume_id format.")
+            resume = resume_library.resolve(supabase, current_user["user_id"], payload.resume_id)
+        except resume_library.ResumeNotFound as e:
+            raise HTTPException(status_code=404, detail=str(e))
 
-        resume = supabase.table("mock_interview_resumes").select("*").eq("id", payload.resume_id).limit(1).execute()
-        if not resume.data:
-            raise HTTPException(status_code=404, detail="Resume not found")
-        if resume.data[0]["user_id"] != current_user["user_id"]:
-            raise HTTPException(status_code=403, detail="Not authorized for this resume")
-
-        file_path = resume.data[0]["file_path"]
-        file_bytes = download_file("mock.interview.resumes", file_path)
-        try:
-            resume_text = extract_resume_text(file_bytes, file_path)
-        except UnreadableResume as e:
-            raise HTTPException(status_code=422, detail=str(e))
-
-        profile = resume_parser.get_profile(payload.resume_id, resume_text)
-        candidate_context = profile_to_prompt_context(profile)
+        file_path = resume["file_path"]
+        # Normally a cache hit: the profile is parsed in the background when
+        # the resume is uploaded, so by the time anyone starts an interview
+        # this costs one SELECT rather than a download plus an LLM pass. The
+        # slow path still exists for resumes uploaded before that, and for
+        # the case where someone uploads and immediately starts.
+        profile = resume_parser.read_cached_profile(resume["id"])
+        if profile is None:
+            file_bytes = download_file("mock.interview.resumes", file_path)
+            try:
+                resume_text = extract_resume_text(file_bytes, file_path)
+            except UnreadableResume as e:
+                raise HTTPException(status_code=422, detail=str(e))
+            profile = resume_parser.get_profile(resume["id"], resume_text)
 
         duration_seconds = payload.duration_minutes * 60
         plan = build_plan(duration_seconds)
@@ -232,9 +355,10 @@ async def create_session(
 
         session_response = supabase.table("mock_interview_sessions").insert({
             "user_id": current_user["user_id"],
-            "resume_id": payload.resume_id,
+            "resume_id": resume["id"],
             "target_role": payload.target_role,
             "company": payload.company,
+            "job_description": (payload.job_description or "").strip() or None,
             "duration_seconds": duration_seconds,
             "plan": plan,
             "difficulty_tier": diff_state.tier,
@@ -249,20 +373,31 @@ async def create_session(
             "session_id": session_id,
             "status": "pending",
         }).execute()
+
+        # Warm-up is a fixed opener and closing is generic, so neither needs
+        # researching -- only the phases that draw on the bank are sized.
+        targets = {
+            phase: count
+            for phase, count in expected_question_counts(plan).items()
+            if phase in ("technical", "behavioral", "situational")
+        }
         background_tasks.add_task(
-            start_prep, supabase, session_id, profile, payload.target_role, payload.company
+            start_prep,
+            supabase, groq_service, session_id, profile,
+            payload.target_role, payload.company,
+            (payload.job_description or "").strip() or None,
+            targets,
         )
 
-        # The warm-up question needs no research and no wait -- it comes from
-        # the resume alone, so the candidate is never staring at a spinner
-        # while the prep agent (which can take minutes) runs.
-        first_question_text = groq_service.generate_first_question(candidate_context, payload.target_role)
+        # No LLM call: the opener is a constant, so the interview begins the
+        # moment this row is written rather than after a round trip to Groq
+        # for a question that needed no thought. See session_planner.
         warmup_budget = plan[0]["question_time_budget"]
         now = datetime.now(timezone.utc)
 
         question_response = supabase.table("mock_interview_questions").insert({
             "session_id": session_id,
-            "question_text": first_question_text,
+            "question_text": OPENING_QUESTION,
             "category": "warmup",
             "question_number": 1,
             "is_answered": False,
@@ -478,7 +613,12 @@ async def submit_session_answer(
                 }).eq("id", session_id).execute()
                 done = True
             else:
-                seed = _pick_seed(supabase, session_id, slot.phase, diff_state.tier, all_questions)
+                brief_row = _read_brief(supabase, session_id)
+                seed = _pick_seed(brief_row, slot.phase, diff_state.tier, all_questions)
+                # Only consulted when nothing was prepared for this phase --
+                # a prepared question is already targeted, and steering it
+                # again would just cost a generation call for no gain.
+                focus_area = None if seed else _pick_focus_area(brief_row, all_questions)
 
                 profile_row = (
                     supabase.table("mock_interview_resume_profiles")
@@ -492,7 +632,8 @@ async def submit_session_answer(
                 asked_texts = [q["question_text"] for q in all_questions]
 
                 generated = groq_service.generate_next_question(
-                    candidate_context, session["target_role"], slot.phase, diff_state.tier, asked_texts, seed,
+                    candidate_context, session["target_role"], slot.phase, diff_state.tier,
+                    asked_texts, seed, focus_area,
                 )
                 nq = supabase.table("mock_interview_questions").insert({
                     "session_id": session_id,
@@ -525,33 +666,42 @@ async def submit_session_answer(
         raise HTTPException(status_code=500, detail=f"Error submitting answer: {str(e)}")
 
 
-def _pick_seed(supabase, session_id: str, phase: str, difficulty_tier: int, asked_questions: list[dict]) -> dict | None:
-    """Pull a matching, unused question seed from the prep agent's brief for
-    the technical phase, if one is ready. Every other phase stays purely
-    generative -- company-style grounding is specifically a technical-round
-    thing (issue #11), not something to force into behavioral/situational
-    questions the prep agent never researched for.
-    """
-    if phase != "technical":
-        return None
-
-    brief_row = (
+def _read_brief(supabase, session_id: str) -> dict:
+    """The session's prep row. Read once per turn and shared by the seed and
+    focus-area pickers, rather than each fetching it separately."""
+    rows = (
         supabase.table("mock_interview_briefs")
         .select("status,brief,question_bank")
         .eq("session_id", session_id)
         .limit(1)
         .execute()
     )
-    if not brief_row.data:
-        return None
-    row = brief_row.data[0]
-    if row["status"] != "ready" or not (row["brief"] or {}).get("grounded"):
+    return rows.data[0] if rows.data else {}
+
+
+def _pick_seed(brief_row: dict, phase: str, difficulty_tier: int, asked_questions: list[dict]) -> dict | None:
+    """Pull a matching, unused question from the prepared bank.
+
+    Serving a prepared question costs no LLM call at all, which is what keeps
+    the gap between a candidate finishing an answer and hearing the next
+    question near-instant. Generation is now the *fallback*, not the norm.
+
+    Two things changed from the original: the bank covers every researched
+    phase rather than technical only (behavioral questions grounded in what a
+    company actually asks are no less useful than technical ones), and it is
+    used whenever prep is ready rather than only when `grounded` is true --
+    a JD-grounded bank with no external sources is still a better question
+    than an unguided one. `grounded` now only decides whether the candidate
+    sees the "company-style" provenance note.
+    """
+    if brief_row.get("status") != "ready":
         return None
 
     asked_texts = {q["question_text"].strip().lower() for q in asked_questions}
     candidates = [
-        seed for seed in (row["question_bank"] or [])
-        if (seed.get("text") or "").strip().lower() not in asked_texts
+        seed for seed in (brief_row.get("question_bank") or [])
+        if seed.get("phase", "technical") == phase
+        and (seed.get("text") or "").strip().lower() not in asked_texts
     ]
     if not candidates:
         return None
@@ -559,6 +709,29 @@ def _pick_seed(supabase, session_id: str, phase: str, difficulty_tier: int, aske
     tier_name = difficulty.TIER_INFO.get(difficulty_tier, {}).get("name")
     exact_tier = [s for s in candidates if s.get("difficulty_hint") == tier_name]
     return (exact_tier or candidates)[0]
+
+
+def _pick_focus_area(brief_row: dict, asked_questions: list[dict]) -> dict | None:
+    """The next resume-vs-JD gap worth probing, if any are left unprobed.
+
+    Used when the bank has nothing for this phase, so a generated question
+    still aims at something specific to this candidate and this posting
+    rather than at the role in general. Gaps are preferred over strengths --
+    an interview learns more from what the resume does not evidence.
+    """
+    areas = (brief_row.get("brief") or {}).get("focus_areas") or []
+    if not areas:
+        return None
+
+    probed = {
+        (q.get("provenance") or {}).get("theme")
+        for q in asked_questions
+        if q.get("provenance")
+    }
+    pool = [a for a in areas if a["topic"] not in probed] or areas
+    gaps = [a for a in pool if a["status"] == "gap"]
+    partials = [a for a in pool if a["status"] == "partial"]
+    return (gaps or partials or pool)[0]
 
 
 @router.post("/sessions/{session_id}/end")
