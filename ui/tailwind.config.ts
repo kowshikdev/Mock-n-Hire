@@ -27,10 +27,19 @@ const config: Config = {
           active: '#0c0a09',
         },
         // Text
-        body: {
-          DEFAULT: '#4e4e4e',
-          strong: '#292524',
-        },
+        //
+        // No `strong` sub-key here on purpose: `fontSize` below also defines
+        // a `body-strong` token (weight/size preset), which every real call
+        // site uses paired with an explicit color class (`text-body-strong
+        // text-ink`) -- never on its own. A `colors.body.strong` entry would
+        // generate its own `text-body-strong` color utility under the exact
+        // same class name, which `tailwind-merge` cannot tell apart from the
+        // font-size one without a custom classGroup for both, and which
+        // silently discarded whichever one it decided lost the conflict
+        // (see lib/utils.ts). Two theme scales sharing one literal class
+        // name was the root cause, not just the merge config -- removing
+        // the never-actually-used color half is the real fix.
+        body: '#4e4e4e',
         muted: {
           DEFAULT: '#777169',
           soft: '#a8a29e',
