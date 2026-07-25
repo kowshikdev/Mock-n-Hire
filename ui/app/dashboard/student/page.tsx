@@ -14,17 +14,27 @@ import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import { Card, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
+import { Field, Input } from "@/components/ui/input"
 import { Container } from "@/components/ui/section"
 import { EmptyState, LoadingState, Spinner } from "@/components/ui/states"
 import { OrbField } from "@/components/ui/orb"
 
 const MAX_RESUME_BYTES = 10 * 1024 * 1024 // 10 MB
 
+// 15/30/45 min, per INTERVIEW_ARCHITECTURE.md: a recruiter screen, a
+// standard technical round, a full loop stage.
+const DURATION_OPTIONS = [
+  { minutes: 15, label: "15 min", hint: "Quick screen" },
+  { minutes: 30, label: "30 min", hint: "Standard round" },
+  { minutes: 45, label: "45 min", hint: "Full loop" },
+]
+
 type SessionRow = {
   id: string
   start_time: string | null
   status: string | null
-  overall_score: number | null
+  target_role: string | null
+  company: string | null
 }
 
 const dateFmt = new Intl.DateTimeFormat(undefined, {
@@ -39,6 +49,9 @@ export default function StudentDashboard() {
   const userId = user?.id
 
   const [resumeFile, setResumeFile] = useState<File | null>(null)
+  const [targetRole, setTargetRole] = useState("")
+  const [company, setCompany] = useState("")
+  const [durationMinutes, setDurationMinutes] = useState(30)
   const [isGenerating, setIsGenerating] = useState(false)
   const [sessions, setSessions] = useState<SessionRow[]>([])
   const [sessionsState, setSessionsState] = useState<"loading" | "ready" | "error">("loading")
@@ -57,7 +70,7 @@ export default function StudentDashboard() {
     try {
       const { data, error } = await supabase
         .from("mock_interview_sessions")
-        .select("id,start_time,status,overall_score")
+        .select("id,start_time,status,target_role,company")
         .eq("user_id", userId)
         .order("start_time", { ascending: false })
         .limit(5)
@@ -108,6 +121,10 @@ export default function StudentDashboard() {
       toast.error("Upload your resume first.")
       return
     }
+    if (!targetRole.trim()) {
+      toast.error("What role are you practising for?")
+      return
+    }
     if (!userId) {
       toast.error("You need to be signed in.")
       return
@@ -128,15 +145,25 @@ export default function StudentDashboard() {
       }
       const { resume_id: resumeId } = await uploadRes.json()
 
-      const genRes = await APIStudent(
-        `/interview/generate-questions/${userId}/${resumeId}`,
-        { method: "POST" }
-      )
-      if (!genRes.ok) {
-        const detail = await genRes.text()
-        throw new Error(detail || "Failed to generate questions")
+      // POST /interview/sessions replaces the old upload -> generate-questions
+      // pair: there is no longer a fixed batch of nine questions to generate
+      // up front. This call itself creates the session, kicks off the prep
+      // agent in the background, and returns the first (warm-up) question.
+      const sessionRes = await APIStudent("/interview/sessions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          resume_id: resumeId,
+          target_role: targetRole.trim(),
+          company: company.trim() || null,
+          duration_minutes: durationMinutes,
+        }),
+      })
+      if (!sessionRes.ok) {
+        const detail = await sessionRes.text()
+        throw new Error(detail || "Failed to create session")
       }
-      const { session_id: sessionId } = await genRes.json()
+      const { session_id: sessionId } = await sessionRes.json()
 
       router.push(`/interview/${sessionId}`)
     } catch (err) {
@@ -208,6 +235,50 @@ export default function StudentDashboard() {
             </div>
           )}
 
+          <div className="grid gap-base sm:grid-cols-2">
+            <Field label="Target role" htmlFor="target-role">
+              <Input
+                id="target-role"
+                placeholder="e.g. Backend Engineer"
+                value={targetRole}
+                onChange={(e) => setTargetRole(e.target.value)}
+                disabled={isGenerating}
+              />
+            </Field>
+            <Field label="Company" hint="Optional -- grounds technical questions in real research">
+              <Input
+                placeholder="e.g. Stripe"
+                value={company}
+                onChange={(e) => setCompany(e.target.value)}
+                disabled={isGenerating}
+              />
+            </Field>
+          </div>
+
+          <Field label="Duration">
+            <div className="flex flex-wrap gap-sm" role="radiogroup" aria-label="Interview duration">
+              {DURATION_OPTIONS.map((opt) => (
+                <button
+                  key={opt.minutes}
+                  type="button"
+                  role="radio"
+                  aria-checked={durationMinutes === opt.minutes}
+                  onClick={() => setDurationMinutes(opt.minutes)}
+                  disabled={isGenerating}
+                  className={cn(
+                    "flex flex-col items-start gap-xxs rounded-lg border px-base py-sm text-left transition-colors disabled:opacity-50",
+                    durationMinutes === opt.minutes
+                      ? "border-ink bg-surface-strong"
+                      : "border-hairline-strong hover:border-ink"
+                  )}
+                >
+                  <span className="text-body-strong text-ink">{opt.label}</span>
+                  <span className="text-caption text-muted">{opt.hint}</span>
+                </button>
+              ))}
+            </div>
+          </Field>
+
           <div className="flex flex-wrap items-center gap-base">
             <Button onClick={handleGenerate} disabled={!resumeFile || isGenerating}>
               {isGenerating ? (
@@ -271,14 +342,11 @@ export default function StudentDashboard() {
                     >
                       <div className="flex flex-col gap-xxs">
                         <span className="text-body-strong text-ink">
-                          {s.start_time
-                            ? dateFmt.format(new Date(s.start_time))
-                            : "Practice session"}
+                          {s.target_role || "Practice session"}
+                          {s.company ? ` · ${s.company}` : ""}
                         </span>
                         <span className="text-caption text-muted">
-                          {s.overall_score != null
-                            ? `Score ${Number(s.overall_score).toFixed(1)}`
-                            : "Not scored"}
+                          {s.start_time ? dateFmt.format(new Date(s.start_time)) : "—"}
                         </span>
                       </div>
                       <div className="flex items-center gap-base">

@@ -12,9 +12,13 @@ actually true" section below before trusting any feature description.
 
 Monorepo: Next.js/TypeScript/Tailwind frontend (`ui/`) + FastAPI backend
 (`api/`) + Supabase (Postgres, storage, auth). LLM calls go to Groq's
-OpenAI-compatible endpoint, model set by `LLM_MODEL` (default
-`llama-3.1-8b-instant` — see "Fixed already" for why this isn't hardcoded
-anymore) + Whisper for transcription.
+OpenAI-compatible endpoint. Three model env vars, each independently
+configurable because a hardcoded model name has already broken production
+once (see "Fixed already"): `LLM_MODEL` (default `llama-3.1-8b-instant`) for
+fast per-turn calls, `AGENT_MODEL` (default `openai/gpt-oss-120b`) for the
+deepagents prep agent, `STT_MODEL` (default `whisper-large-v3-turbo`) for
+transcription. `TAVILY_API_KEY` is optional — unset means every interview
+runs in generic (resume-only) mode instead of failing to start.
 
 ## Design system
 
@@ -53,21 +57,37 @@ practice interview is planned, conducted, and scored (issues #9–#12). The
 short version:
 
 - **Sessions are time-boxed, not question-boxed.** The candidate picks a
-  duration; phase budgets (warmup/technical/behavioral/situational/closing)
-  divide it, and the question count falls out of that. Nine-questions-always
-  was arbitrary and is being removed.
-- **Two agents, deliberately different.** A **deepagents** prep agent does the
-  open-ended research (resume + role + company via Tavily) once per session in
-  the background; the live interviewer is plain Groq calls behind REST,
-  because its control flow is fixed and a human is waiting on it. Do not merge
-  them.
-- **Discrete REST, one round-trip per turn.** Not SSE — Railway caps SSE at 15
-  minutes and a session runs longer.
+  duration (15/30/45 min); phase budgets
+  (warmup/technical/behavioral/situational/closing) divide it, and the
+  question count falls out of that — no longer a fixed nine.
+  `student/core/session_planner.py` builds the plan and decides each turn's
+  next phase from real `asked_at`/`answered_at` timestamps.
+- **Two agents, deliberately different.** A **deepagents** prep agent
+  (`student/agents/`) does the open-ended research (resume + role + company
+  via Tavily) once per session in the background; the live interviewer
+  (`student/api/routes/interview.py`) is plain Groq calls behind REST,
+  because its control flow is fixed and a human is waiting on it. Do not
+  merge them.
+- **Discrete REST, one round-trip per turn.** `POST /interview/sessions` ->
+  `POST /interview/sessions/{id}/answer` (repeated) -> `GET
+  /interview/sessions/{id}/report`. Not SSE — Railway caps SSE at 15 minutes
+  and a session runs longer.
 - **Prep failure never blocks an interview.** The session opens with a
-  resume-derived warm-up question while prep runs; if it fails, the session
-  falls back to resume-only generation.
-- **Delivery is never a penalty.** Speaking pace is private candidate-side
-  coaching, excluded from the score (see "Fixed already").
+  resume-derived warm-up question while prep runs in a `BackgroundTasks`
+  job; if it fails, times out, or `TAVILY_API_KEY` is unset, the session
+  falls back to resume-only generation. `mock_interview_briefs.status` is
+  always driven to a terminal state (`ready`/`failed`) by
+  `student/core/prep_service.py` — the live loop only ever reads it, never
+  waits on it.
+- **Difficulty is a 2-down/1-up staircase** across 5 named tiers
+  (`student/core/difficulty.py`), passed to the model as a tier name + a
+  written behavioural anchor, never a bare number.
+- **Delivery is never a penalty.** Speaking pace (`student/core/pace.py`) is
+  private candidate-side coaching, excluded from `final_score` entirely —
+  see "Fixed already" for the bug this replaced.
+- **`final_score` is difficulty-weighted**, not a flat mean — a strong answer
+  at a harder tier counts for more. Unanswered questions are excluded, never
+  scored as 0.
 
 ## Layout (monorepo)
 
@@ -77,7 +97,7 @@ short version:
 - `api/` — FastAPI backend. **One app, one Railway service.**
   `api/api_service.py` is the sole entrypoint: recruiter routes (resume
   upload/ranking) are defined inline, candidate/interview routes
-  (`/interview`, `/stress`, `/admin`) come from `api/student/api/routes/`
+  (`/interview`, `/admin`) come from `api/student/api/routes/`
   and are mounted via `app.include_router(...)`. Was two separate FastAPI
   apps/Railway services (`api/student/main.py` ran standalone on :8001);
   merged to halve baseline compute cost since traffic doesn't yet justify
@@ -104,9 +124,9 @@ short version:
   candidate-side coaching.
 - **"LLM + FAISS semantic matching" uses neither FAISS nor embeddings.**
   `sentence-transformers`/`faiss-cpu` are imported and never used. Ranking is
-  a Groq LLM JSON verdict combining two 0–10 sub-scores. (issue #9)
-- **The candidate's typed target role is discarded** — every mock interview
-  is generated from a hardcoded `"Software Engineer"` prompt. (issue #9)
+  a Groq LLM JSON verdict combining two 0–10 sub-scores. (issue #9 — this is
+  the recruiter-side ranking, untouched by the candidate-side interview
+  rewrite below)
 
 ## Fixed already
 
@@ -221,13 +241,49 @@ short version:
   `groq_whisper_service.py`. Transcription model is now `STT_MODEL`, for the
   same reason `LLM_MODEL` is.
 
+- **The candidate's target role is no longer discarded** (issue #9,
+  resolved by the interview rewrite below). `POST /interview/sessions` takes
+  `target_role`/`company` directly and both flow through the whole pipeline:
+  question generation, the prep agent's research, and the report.
+- **Resume parsing rewritten and shared across both sides.** Reading order
+  on two-column resumes needed line-level geometry and real gutter
+  detection, not block-level sorting — `get_text("blocks")` merges text
+  sharing a baseline, so a two-column resume's blocks hold *both* columns
+  interleaved; the fix works on lines, scored on how well a candidate gutter
+  position balances content either side. DOCX is now accepted on the
+  candidate side (was PDF-only, while the recruiter side always took DOCX)
+  and DOCX tables are read (`python-docx` doesn't surface table text via
+  `.paragraphs`). Parsed once into a typed profile, cached in
+  `mock_interview_resume_profiles`. See `api/resume_text.py`,
+  `student/core/resume_parser.py`.
+- **The whole fixed-nine-question interview replaced with a duration-driven,
+  adaptive one** (issues #9–#12; design in `INTERVIEW_ARCHITECTURE.md`).
+  `generate-questions`/`next-question`/`submit-answer` are gone, replaced by
+  `POST /interview/sessions`, `GET .../state`, `POST .../answer`, `POST
+  .../end`, `GET .../report`. Questions are generated one at a time, just in
+  time; follow-ups are asked when the rubric shows relevant-but-vague (not
+  just "could go deeper"), capped at one per question (two in technical) and
+  never chained past one level deep. A **deepagents** prep agent grounds
+  technical-phase questions in real research via Tavily when a company is
+  named and `TAVILY_API_KEY` is set — cluster-and-rewrite, never verbatim
+  reposting, with honest provenance (`source_count`, `date_range`) shown to
+  the candidate. Evaluation is a full rubric
+  (relevance/specificity/depth/structure/evidence_quotes/gaps), not a bare
+  score. `stress.py` (an OpenCV video-duration probe feeding a "stress"
+  score) is deleted entirely — `whisper_service.transcribe()` now returns
+  audio duration directly from the transcription call already being made,
+  and that duration drives `student/core/pace.py`'s delivery-pace figure,
+  which stays out of `final_score` for the same EU AI Act reasoning as
+  above. A real, previously-unnoticed bug surfaced while writing a
+  realistic test fixture for the report: the Supabase embed
+  `user_id:mock_interview_users(user_id:users(...))` nests *twice* (name/
+  email live on `users`, one level deeper than `mock_interview_users`), and
+  `report_service.py` had always read one level too shallow — every report
+  this service ever generated silently said "Unknown User".
+
 ## Known issues still open
 
 - No tests, no CI (issue #8).
-- **The candidate's target role is still discarded** (issue #9). The role
-  input was removed from the student dashboard rather than left in place:
-  it was collected and never sent anywhere, so it changed nothing. Restore
-  it when `generate-questions` accepts a role.
 - **`weight_certifications` is still not wired** (issue #9). The third
   weight slider was removed from the new-screening modal for the same
   reason — the FastAPI endpoint never declared the field, so the value was
@@ -242,6 +298,11 @@ short version:
 ## Roadmap
 
 Phased in issues #7–#12: security (#7 ✅) → cleanup + schema-as-code +
-tests/CI (#8) → resume/role personalization + explainable recruiter scoring
-(#9) → deepagents-based adaptive interview agent (#10) → Tavily company-style
-question grounding (#11) → real longitudinal progress dashboard (#12).
+tests/CI (#8, still open) → resume/role personalization + explainable
+recruiter scoring (#9, candidate side done — target role now flows through
+end to end; recruiter-side certifications weight still not wired) →
+deepagents-based adaptive interview agent (#10 ✅, prep agent + adaptive loop
+shipped, not yet verified end to end against a live Groq key) → Tavily
+company-style question grounding (#11 ✅, shipped as part of the same prep
+agent) → real longitudinal progress dashboard (#12, `user-summary` endpoint
+and session-history page exist; no dedicated trends/charts view yet).
