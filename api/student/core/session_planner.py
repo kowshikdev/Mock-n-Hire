@@ -20,6 +20,21 @@ PHASE_SPEC: list[tuple[str, float, int]] = [
     ("closing", 0.05, 90),
 ]
 
+# Every interview opens with this, verbatim.
+#
+# It used to be generated from the resume, which was wrong three ways. Real
+# interviews open with a self-introduction, so a resume-specific opener broke
+# the one convention every candidate has actually rehearsed. It put a Groq
+# call on the critical path of session creation, so the candidate waited on a
+# spinner for a question that needed no thought to produce. And it wasted the
+# most useful signal in the session: what a candidate *chooses* to lead with,
+# unprompted, grounds every question that follows better than anything a model
+# could infer from the resume alone.
+#
+# Being a constant is the point -- it is served without an LLM call, so the
+# interview starts the instant the session row is written.
+OPENING_QUESTION = "To start, tell me a bit about yourself and what brings you to this role."
+
 # A session hard-stops here even mid-phase. Long enough that one slow answer
 # near the end doesn't cut the candidate off mid-sentence; short enough that
 # a stalled session doesn't run forever.
@@ -47,6 +62,26 @@ def build_plan(duration_seconds: int) -> list[dict]:
         }
         for phase, share, qtime in PHASE_SPEC
     ]
+
+
+def expected_question_counts(plan: list[dict]) -> dict[str, int]:
+    """Roughly how many questions each phase has room for.
+
+    The live loop never uses this -- it decides phase by phase from real
+    elapsed time, because a candidate who answers fast earns extra questions
+    and one who rambles gets fewer. This is for the *prep* agent, which has
+    to decide how much material to research before any of that is known. A
+    15-minute session wants about seven questions and a 45-minute one about
+    twenty, and researching a flat "6-10" for both left the long session
+    running out of prepared material halfway through.
+
+    Deliberately a floor of one: a phase with room for half a question still
+    gets asked one, so it still needs something prepared.
+    """
+    return {
+        p["phase"]: max(1, round(p["budget_seconds"] / p["question_time_budget"]))
+        for p in plan
+    }
 
 
 @dataclass(frozen=True)

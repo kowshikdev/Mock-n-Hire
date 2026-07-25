@@ -64,6 +64,17 @@ class ResumeParser:
         self._write_cache(resume_id, profile)
         return profile
 
+    def read_cached_profile(self, resume_id: str) -> dict | None:
+        """The stored profile, or None if this resume hasn't been parsed yet.
+
+        Separate from `get_profile` because the caller starting an interview
+        wants to know whether parsing is *needed*, not to trigger it: parsing
+        costs a storage download plus a multi-second LLM pass, and putting
+        that on the session-creation request is exactly the latency the
+        upload-time background parse exists to avoid.
+        """
+        return self._read_cache(resume_id)
+
     def parse(self, resume_text: str) -> dict:
         """Extract a structured profile from resume text."""
         prompt = f"""Extract this resume into structured data.

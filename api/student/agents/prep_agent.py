@@ -19,7 +19,12 @@ from deepagents import create_deep_agent
 from groq import Groq
 
 from student.agents.model import get_agent_model
-from student.agents.schemas import DIFFICULTY_HINTS, InterviewBrief, QuestionSeed
+from student.agents.schemas import (
+    DIFFICULTY_HINTS,
+    SEED_PHASES,
+    InterviewBrief,
+    QuestionSeed,
+)
 from student.agents.tavily_tools import build_tavily_tools
 from student.config.settings import settings
 from student.core.resume_parser import profile_to_prompt_context
@@ -57,11 +62,13 @@ system will use to run it.
    matters. Keep your own context focused on planning and synthesis.
 6. Finish by writing your findings out as your final message, in plain
    markdown. Cover: what you learned about the company and role, the
-   competencies this role actually seems to test for, and then 6-10
-   questions. For each question give the question text, the theme it
-   probes, a difficulty from foundational/applied/proficient/advanced/expert,
-   and the source URLs and publication dates behind it (write "resume-derived,
-   no sources" for the ones that have none).
+   competencies this role actually seems to test for, and then the questions
+   themselves -- as many per phase as the request asks for. For each question
+   give the question text, the phase it belongs to
+   (technical/behavioral/situational/closing), the theme it probes, a
+   difficulty from foundational/applied/proficient/advanced/expert, and the
+   source URLs and publication dates behind it (write "resume-derived, no
+   sources" for the ones that have none).
 
 Every question must be an ORIGINAL question you wrote that matches a pattern
 you found -- never a question copied verbatim from a source. Attribute
@@ -93,6 +100,7 @@ BRIEF_JSON_SHAPE = """{
     {
       "text": "the question exactly as written in the findings",
       "theme": "what it probes",
+      "phase": "one of: technical | behavioral | situational | closing",
       "difficulty_hint": "one of: foundational | applied | proficient | advanced | expert",
       "source_count": 0,
       "source_urls": ["https://..."],
@@ -198,11 +206,13 @@ def _normalise_brief(payload: dict) -> dict:
         if not text:
             continue
         hint = (raw.get("difficulty_hint") or "").strip().lower()
+        phase = (raw.get("phase") or "").strip().lower()
         urls = [u for u in (raw.get("source_urls") or []) if isinstance(u, str) and u.startswith("http")]
         try:
             seeds.append(QuestionSeed(
                 text=text,
                 theme=(raw.get("theme") or "").strip() or "general",
+                phase=phase if phase in SEED_PHASES else "technical",
                 difficulty_hint=hint if hint in DIFFICULTY_HINTS else "applied",
                 # Counted from the URLs actually present, never taken on the
                 # model's word. source_count is what the candidate is shown
@@ -231,12 +241,25 @@ def run_prep(
     target_role: str,
     company: str | None,
     tavily_api_key: str,
+    job_description: str | None = None,
+    question_targets: dict[str, int] | None = None,
+    focus_areas: list[dict] | None = None,
 ) -> dict:
     """Run the prep agent to completion and return the brief as a plain dict.
 
-    Synchronous and blocking by design -- the caller (Stage 4's prep_service)
-    is expected to run this inside a FastAPI BackgroundTask, off the request
+    Synchronous and blocking by design -- the caller (prep_service) is
+    expected to run this inside a FastAPI BackgroundTask, off the request
     that started the session, not on it.
+
+    `question_targets` sizes the research to the session the candidate
+    actually booked. It used to ask for a flat "6-10 questions" regardless,
+    which under-served a 45-minute session (roughly twenty slots) and
+    over-researched a 15-minute one (roughly seven).
+
+    `focus_areas` is the resume-vs-JD gap pass, already computed by the
+    caller. Handing it to the researcher means the research targets what this
+    specific candidate is weak on for this specific posting, rather than what
+    the company asks everyone.
     """
     agent = create_prep_agent(tavily_api_key)
 
@@ -247,13 +270,35 @@ def run_prep(
         else "No specific target company was given -- ground the brief in the resume and role alone."
     )
 
+    jd_block = ""
+    if (job_description or "").strip():
+        # Truncated because a JD is pasted by a human and occasionally
+        # includes an entire careers page. The first few thousand characters
+        # carry the requirements; the rest is boilerplate.
+        jd_block = f"\nJob description:\n\"\"\"\n{job_description.strip()[:6000]}\n\"\"\"\n"
+
+    targets_block = ""
+    if question_targets:
+        wanted = ", ".join(f"{n} {phase}" for phase, n in question_targets.items() if n > 0)
+        targets_block = f"\nWrite this many questions per phase: {wanted}.\n"
+
+    focus_block = ""
+    if focus_areas:
+        lines = "\n".join(
+            f"- {a['topic']} ({a['status']}): {a['why']}" for a in focus_areas
+        )
+        focus_block = (
+            "\nThis candidate has already been compared against the role. "
+            "Weight your research and questions toward these:\n" + lines + "\n"
+        )
+
     user_message = f"""Target role: {target_role}
 {company_line}
-
+{jd_block}{targets_block}{focus_block}
 Candidate resume:
 {candidate_context}
 
-Research this and produce the interview brief."""
+Research this and write up the interview brief."""
 
     result = agent.invoke(
         {"messages": [{"role": "user", "content": user_message}]},

@@ -71,6 +71,63 @@ Respond with JSON of exactly this shape: {{"text": "..."}}"""
             raise Exception("Model returned an empty warm-up question")
         return text
 
+    def analyse_fit(
+        self,
+        candidate_context: str,
+        target_role: str,
+        job_description: str | None,
+    ) -> dict:
+        """What this candidate should expect to be probed on, and why.
+
+        This is the thing a job description actually buys. A role title only
+        implies a stack; a JD names it, along with the seniority and the
+        responsibilities -- so "the posting asks for Kafka and your resume
+        shows RabbitMQ" is a question worth asking, and one no amount of
+        role-title guessing would produce.
+
+        Runs with or without a JD: without one it reduces to "what does this
+        resume leave open for this role", which is still better than nothing
+        and keeps the caller free of a second code path.
+        """
+        jd_block = (
+            f"Job description:\n\"\"\"\n{job_description.strip()[:6000]}\n\"\"\""
+            if (job_description or "").strip()
+            else "No job description was provided -- work from the role title alone."
+        )
+
+        prompt = f"""Compare this candidate against what the role demands.
+
+Target role: {target_role}
+
+{jd_block}
+
+Candidate:
+\"\"\"
+{candidate_context or "(no resume details available)"}
+\"\"\"
+
+Identify 3-6 areas an interviewer would genuinely want to probe. For each:
+- topic: the specific competency or technology, not a vague category
+- status: "gap" if the role needs it and the resume shows no evidence,
+  "partial" if there's adjacent-but-not-matching evidence, "strength" if
+  the resume evidences it well and it's worth testing depth on
+- why: one sentence citing what the role asks for and what the resume shows
+
+Only claim something is in the job description if it actually appears there.
+Prefer gaps and partials over strengths -- those are where an interview is
+most informative.
+
+Respond with JSON of exactly this shape:
+{{"role_summary": "one sentence on what this role really tests for",
+  "focus_areas": [{{"topic": "...", "status": "gap", "why": "..."}}]}}"""
+
+        payload = self._chat_json(
+            system="You analyse the fit between a resume and a role, concretely and without flattery. You reply with JSON only.",
+            user=prompt,
+            max_tokens=900,
+        )
+        return _normalise_fit(payload)
+
     def generate_next_question(
         self,
         candidate_context: str,
@@ -79,6 +136,7 @@ Respond with JSON of exactly this shape: {{"text": "..."}}"""
         difficulty_tier: int,
         asked_texts: list[str],
         seed: dict | None = None,
+        focus_area: dict | None = None,
     ) -> dict:
         """One phase-appropriate question.
 
@@ -101,6 +159,13 @@ Respond with JSON of exactly this shape: {{"text": "..."}}"""
             }
 
         avoid = "\n".join(f"- {t}" for t in asked_texts[-10:]) or "(none yet)"
+        focus_block = ""
+        if focus_area:
+            focus_block = (
+                f"\nProbe this specifically: {focus_area['topic']} "
+                f"({focus_area['status']} -- {focus_area['why']})\n"
+            )
+
         prompt = f"""Write ONE {phase} interview question for a {target_role} candidate.
 
 Difficulty: {tier_prompt_context(difficulty_tier)}
@@ -109,7 +174,7 @@ Candidate:
 \"\"\"
 {candidate_context or "(no resume details available)"}
 \"\"\"
-
+{focus_block}
 Already asked this session -- do not repeat or closely resemble any of these:
 {avoid}
 
@@ -125,7 +190,13 @@ role-general. Respond with JSON of exactly this shape: {{"text": "..."}}"""
         text = (payload.get("text") or "").strip()
         if not text:
             raise Exception(f"Model returned an empty {phase} question")
-        return {"text": text, "provenance": None}
+        provenance = (
+            {"source_count": 0, "source_urls": [], "date_range": [], "theme": focus_area["topic"],
+             "origin": "jd_gap" if focus_area["status"] in ("gap", "partial") else "resume"}
+            if focus_area
+            else None
+        )
+        return {"text": text, "provenance": provenance}
 
     # ------------------------------------------------------------------ #
     # Evaluation -- one structured rubric per answer, with the follow-up
@@ -210,6 +281,32 @@ Respond with JSON of exactly this shape:
                 "score": None,
                 "feedback": "This answer could not be scored automatically.",
             }
+
+
+FIT_STATUSES = ("gap", "partial", "strength")
+
+
+def _normalise_fit(payload: dict) -> dict:
+    areas = []
+    for raw in (payload.get("focus_areas") or [])[:6]:
+        if not isinstance(raw, dict):
+            continue
+        topic = (raw.get("topic") or "").strip()
+        if not topic:
+            continue
+        status = (raw.get("status") or "").strip().lower()
+        areas.append({
+            "topic": topic,
+            # An unrecognised status becomes "partial" rather than being
+            # dropped: the topic is still worth probing, and "partial" is the
+            # claim that asserts least about the candidate.
+            "status": status if status in FIT_STATUSES else "partial",
+            "why": (raw.get("why") or "").strip(),
+        })
+    return {
+        "role_summary": (payload.get("role_summary") or "").strip(),
+        "focus_areas": areas,
+    }
 
 
 def _clamp10(value) -> int:

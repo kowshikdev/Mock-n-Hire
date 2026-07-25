@@ -17,6 +17,11 @@ from pydantic import BaseModel, Field
 DifficultyHint = Literal["foundational", "applied", "proficient", "advanced", "expert"]
 DIFFICULTY_HINTS: frozenset[str] = frozenset(get_args(DifficultyHint))
 
+# Which phase of the live interview a seed belongs to. Warm-up is absent on
+# purpose: that slot is a fixed opener, not something to research.
+SeedPhase = Literal["technical", "behavioral", "situational", "closing"]
+SEED_PHASES: frozenset[str] = frozenset(get_args(SeedPhase))
+
 
 class QuestionSeed(BaseModel):
     """One candidate question for the live interview to draw on.
@@ -29,6 +34,10 @@ class QuestionSeed(BaseModel):
 
     text: str = Field(description="The question itself.")
     theme: str = Field(description="Short label for what this question probes, e.g. 'distributed systems failure modes'.")
+    phase: SeedPhase = Field(
+        default="technical",
+        description="Which phase of the interview this belongs to.",
+    )
     difficulty_hint: DifficultyHint = Field(
         description="Rough difficulty this question fits, using the same tier names as the live interview's staircase."
     )
