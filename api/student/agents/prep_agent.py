@@ -13,6 +13,7 @@ seconds of budget. See INTERVIEW_ARCHITECTURE.md section 3.
 from __future__ import annotations
 
 from deepagents import create_deep_agent
+from langchain.agents.structured_output import ToolStrategy
 
 from student.agents.model import get_agent_model
 from student.agents.schemas import InterviewBrief
@@ -70,7 +71,18 @@ def create_prep_agent(tavily_api_key: str):
         model=get_agent_model(),
         tools=tools,
         system_prompt=PREP_INSTRUCTIONS,
-        response_format=InterviewBrief,
+        # Passing the bare Pydantic class here lets langchain auto-select a
+        # strategy, and that auto-detection is wrong for Groq: it checks
+        # model.profile["structured_output"] (True for our model) with an
+        # exception carve-out only for Gemini's known tools+structured-output
+        # conflict -- so it picks ProviderStrategy (JSON mode) even though
+        # tools are bound, and Groq's API rejects response_format=json_object
+        # combined with tools outright ("json mode cannot be combined with
+        # tool/function calling", confirmed against a live deployment).
+        # Forcing ToolStrategy explicitly skips that auto-detection branch
+        # entirely -- verified in langchain.agents.factory: it only calls the
+        # buggy check when response_format resolves to AutoStrategy.
+        response_format=ToolStrategy(InterviewBrief),
     )
 
 
