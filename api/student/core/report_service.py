@@ -29,6 +29,63 @@ class ReportService:
         self.supabase = supabase
         self.groq_service = groq_service
 
+    def _candidate_name(self, user_id: str) -> str | None:
+        """The candidate's display name, or None if we can't establish it.
+
+        This deliberately does NOT use a PostgREST embed. The obvious
+        `mock_interview_sessions -> mock_interview_users -> users` traversal
+        is impossible: `mock_interview_users.user_id` and
+        `public.users.user_id` are both foreign keys onto `auth.users.id`,
+        so the two tables are *siblings* with no FK between them and
+        PostgREST has no relationship to follow. The embed this replaces
+        returned PGRST200 ("Could not find a relationship ... in the schema
+        cache") on every single call, which is why
+        `mock_interview_reports` held zero rows -- no report had ever been
+        generated, for any session, by any user.
+
+        `mock_interview_sessions.user_id` IS the auth uid, and
+        `public.users` is keyed on that same uid, so one plain lookup gets
+        there directly. Costs one extra round trip; depends on no FK.
+
+        Returns None rather than a placeholder: the name is interpolated
+        into text the candidate reads about themselves, and "Unknown User
+        answered 4 of 6 questions" is worse than not using a name at all.
+        """
+        try:
+            row = (
+                self.supabase.table("users")
+                .select("name")
+                .eq("user_id", user_id)
+                .limit(1)
+                .execute()
+            )
+        except Exception as e:
+            logger.warning(f"Could not look up candidate name for {user_id}: {e}")
+            return None
+        if not row.data:
+            return None
+        return (row.data[0].get("name") or "").strip() or None
+
+    def _cached_narrative(self, session_id: str) -> tuple[str, str] | None:
+        """The already-written (summary, recommendation) for this session, if
+        one exists. None means it still has to be generated."""
+        try:
+            row = (
+                self.supabase.table("mock_interview_reports")
+                .select("overall_summary,recommendation")
+                .eq("session_id", session_id)
+                .limit(1)
+                .execute()
+            )
+        except Exception as e:
+            logger.warning(f"Could not read cached report for {session_id}: {e}")
+            return None
+        if not row.data:
+            return None
+        summary = (row.data[0].get("overall_summary") or "").strip()
+        recommendation = (row.data[0].get("recommendation") or "").strip()
+        return (summary, recommendation) if summary and recommendation else None
+
     def generate_final_report(self, session_id: str) -> FinalReportResponse:
         logger.info(f"Generating final report for session_id: {session_id}")
         try:
@@ -38,20 +95,12 @@ class ReportService:
                 raise ValueError("Invalid session_id format. Must be a valid UUID.")
 
             session_row = self.supabase.table("mock_interview_sessions").select(
-                "*, user_id:mock_interview_users(user_id:users(user_id, name, email, role))"
-            ).eq("id", session_id).execute()
+                "*"
+            ).eq("id", session_id).limit(1).execute()
             if not session_row.data:
                 raise Exception(f"No session found with session_id: {session_id}")
             session = session_row.data[0]
-            # The alias nests twice: session["user_id"] is the embedded
-            # mock_interview_users row, which itself only has (user_id, role)
-            # -- name/email live on `users`, reached through the row's OWN
-            # user_id alias one level deeper. Reading session["user_id"]["name"]
-            # (one level too shallow) always fell through to "Unknown User"
-            # silently, in every report this service ever generated.
-            mock_user_row = session.get("user_id") or {}
-            user_data = mock_user_row.get("user_id") or {}
-            user_name = user_data.get("name") or "Unknown User"
+            user_name = self._candidate_name(session["user_id"])
 
             questions = self.supabase.table("mock_interview_questions").select("*").eq(
                 "session_id", session_id
@@ -129,8 +178,8 @@ class ReportService:
                 if gaps:
                     evidence_lines.append(f"- Q{qr.question_number} ({qr.phase}) gap: " + "; ".join(gaps))
 
-            session_facts = f"""Candidate: {user_name}
-Target role: {session.get('target_role') or 'unspecified'}
+            candidate_line = f"Candidate: {user_name}\n" if user_name else ""
+            session_facts = f"""{candidate_line}Target role: {session.get('target_role') or 'unspecified'}
 Questions asked: {len(questions)}
 Questions answered: {answered_count}
 Overall score: {score_line}
@@ -152,48 +201,58 @@ than restating the score. Do not invent detail that isn't in the evidence."""
 Write 1-2 sentences, addressed to them, about answer quality -- grounded in
 a specific gap from the evidence above, not a generic tip."""
 
-            overall_summary = f"{user_name} answered {answered_count} of {len(questions)} questions, scoring {score_line}."
-            try:
-                completion = self.groq_service.client.chat.completions.create(
-                    messages=[
-                        {"role": "system", "content": "You are a helpful AI assistant that summarizes interview performance."},
-                        {"role": "user", "content": summary_prompt},
-                    ],
-                    model=settings.LLM_MODEL,
-                    max_tokens=200,
-                    temperature=0.7,
-                )
-                overall_summary = completion.choices[0].message.content.strip()
-            except Exception as e:
-                logger.error(f"Failed to generate summary via Groq API: {e}")
-
-            if final_score is None:
-                recommendation = "Run the interview again and answer out loud so there's something to review."
-            elif final_score < 6:
-                recommendation = "Work on structure: state the situation, what you did, and the result, with concrete detail in each."
+            # A finished session's narrative doesn't change, but this endpoint
+            # is a plain GET the summary page hits on every load and refresh.
+            # Regenerating meant two Groq calls per view, so the same
+            # interview could be described differently each time the
+            # candidate reloaded the page. Write once, then serve.
+            cached = self._cached_narrative(session_id)
+            if cached:
+                overall_summary, recommendation = cached
             else:
-                recommendation = "Keep practising, and push for more specific evidence -- numbers, tools, outcomes -- in each answer."
-            try:
-                completion = self.groq_service.client.chat.completions.create(
-                    messages=[
-                        {"role": "system", "content": "You are a helpful AI assistant that provides interview recommendations."},
-                        {"role": "user", "content": recommendation_prompt},
-                    ],
-                    model=settings.LLM_MODEL,
-                    max_tokens=150,
-                    temperature=0.7,
-                )
-                recommendation = completion.choices[0].message.content.strip()
-            except Exception as e:
-                logger.error(f"Failed to generate recommendation via Groq API: {e}")
+                who = user_name or "You"
+                overall_summary = f"{who} answered {answered_count} of {len(questions)} questions, scoring {score_line}."
+                try:
+                    completion = self.groq_service.client.chat.completions.create(
+                        messages=[
+                            {"role": "system", "content": "You are a helpful AI assistant that summarizes interview performance."},
+                            {"role": "user", "content": summary_prompt},
+                        ],
+                        model=settings.LLM_MODEL,
+                        max_tokens=200,
+                        temperature=0.7,
+                    )
+                    overall_summary = completion.choices[0].message.content.strip()
+                except Exception as e:
+                    logger.error(f"Failed to generate summary via Groq API: {e}")
 
-            self.supabase.table("mock_interview_reports").upsert({
-                "session_id": session_id,
-                "overall_summary": overall_summary,
-                "final_score": final_score,
-                "recommendation": recommendation,
-                "created_at": datetime.utcnow().isoformat(),
-            }, on_conflict=["session_id"]).execute()
+                if final_score is None:
+                    recommendation = "Run the interview again and answer out loud so there's something to review."
+                elif final_score < 6:
+                    recommendation = "Work on structure: state the situation, what you did, and the result, with concrete detail in each."
+                else:
+                    recommendation = "Keep practising, and push for more specific evidence -- numbers, tools, outcomes -- in each answer."
+                try:
+                    completion = self.groq_service.client.chat.completions.create(
+                        messages=[
+                            {"role": "system", "content": "You are a helpful AI assistant that provides interview recommendations."},
+                            {"role": "user", "content": recommendation_prompt},
+                        ],
+                        model=settings.LLM_MODEL,
+                        max_tokens=150,
+                        temperature=0.7,
+                    )
+                    recommendation = completion.choices[0].message.content.strip()
+                except Exception as e:
+                    logger.error(f"Failed to generate recommendation via Groq API: {e}")
+
+                self.supabase.table("mock_interview_reports").upsert({
+                    "session_id": session_id,
+                    "overall_summary": overall_summary,
+                    "final_score": final_score,
+                    "recommendation": recommendation,
+                    "created_at": datetime.utcnow().isoformat(),
+                }, on_conflict=["session_id"]).execute()
 
             return FinalReportResponse(
                 session_id=session_id,

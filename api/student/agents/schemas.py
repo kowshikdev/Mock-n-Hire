@@ -1,17 +1,21 @@
 """The prep agent's output contract.
 
-Passed as `response_format` to `create_deep_agent`, so the agent's final
-answer is captured as this type in `result["structured_response"]` instead of
-free-form prose that the caller would have to re-parse.
+NOT passed as `response_format` to `create_deep_agent` -- see
+prep_agent.create_prep_agent for why neither of langchain's structured-output
+strategies works for a tool-using agent on Groq. This is the schema the
+separate extraction call validates against instead, which means it also has
+to survive a model that only ever saw it as a JSON shape in a prompt: hence
+`_normalise_brief`'s repair pass rather than a bare `InterviewBrief(**payload)`.
 """
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, get_args
 
 from pydantic import BaseModel, Field
 
 DifficultyHint = Literal["foundational", "applied", "proficient", "advanced", "expert"]
+DIFFICULTY_HINTS: frozenset[str] = frozenset(get_args(DifficultyHint))
 
 
 class QuestionSeed(BaseModel):
