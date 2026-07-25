@@ -35,12 +35,11 @@ sentence-transformers     # loaded in process_resumes.py (embedding-based rankin
 pymupdf                   # PDF extraction (imports as `fitz`)
 python-docx               # DOCX extraction
 
-# headless, not opencv-python: the full package needs libGL/libxcb etc. that
-# Railway's build image doesn't have (crashed on deploy: "ImportError:
-# libxcb.so.1: cannot open shared object file"). stress.py only calls
-# cv2.VideoCapture for a duration probe, no GUI features -- headless is a
-# drop-in replacement, same `import cv2` namespace, no code changes needed.
-opencv-python-headless    # video duration probe in student/api/routes/stress.py
+# opencv-python-headless was here for stress.py's OpenCV video-duration probe
+# (a second download of the video upload just to call cv2.VideoCapture on
+# it). Removed along with stress.py once whisper_service.transcribe()
+# started returning audio duration directly from the transcription call
+# already being made -- see student/core/pace.py.
 
 # Prep agent (student/agents/) -- open-ended research before a session
 # starts, kept deliberately separate from the live interview loop. See

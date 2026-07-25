@@ -1,12 +1,28 @@
-from student.models.schemas import QuestionReport, FinalReportResponse, UserSummaryResponse, SessionStats
-from student.config.settings import settings
-from typing import List, Dict
-from datetime import datetime
 import logging
+import uuid
+from datetime import datetime
+from typing import List
 
-# Configure logging
+from student.config.settings import settings
+from student.core.pace import pace_label
+from student.models.schemas import (
+    CategoryPerformance,
+    FinalReportResponse,
+    QuestionReport,
+    UserSummaryResponse,
+)
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+
+
+def _phase_of(row: dict) -> str:
+    """`phase` for sessions built on the new duration-driven loop, falling
+    back to the old `category` field (technical/hr/situational/surprise) for
+    any session created before that migration -- so a report for an
+    older session still renders instead of showing a blank phase."""
+    return row.get("phase") or row.get("category") or "general"
+
 
 class ReportService:
     def __init__(self, supabase, groq_service):
@@ -16,369 +32,253 @@ class ReportService:
     def generate_final_report(self, session_id: str) -> FinalReportResponse:
         logger.info(f"Generating final report for session_id: {session_id}")
         try:
-            # Validate session_id format (must be a valid UUID)
-            import uuid
             try:
                 uuid.UUID(session_id)
             except ValueError:
-                logger.error(f"Invalid session_id format: {session_id}")
                 raise ValueError("Invalid session_id format. Must be a valid UUID.")
 
-            # Check if the session exists and fetch user details
-            logger.debug(f"Fetching session with id: {session_id}")
-            session = self.supabase.table("mock_interview_sessions").select(
+            session_row = self.supabase.table("mock_interview_sessions").select(
                 "*, user_id:mock_interview_users(user_id:users(user_id, name, email, role))"
             ).eq("id", session_id).execute()
-            if not session.data:
-                logger.error(f"No session found with session_id: {session_id}")
+            if not session_row.data:
                 raise Exception(f"No session found with session_id: {session_id}")
-            session_data = session.data[0]
-            user_data = session_data.get("user_id", {})
-            user_name = user_data.get("name", "Unknown User") if user_data else "Unknown User"
-            user_role = user_data.get("role", "candidate") if user_data else "candidate"
+            session = session_row.data[0]
+            # The alias nests twice: session["user_id"] is the embedded
+            # mock_interview_users row, which itself only has (user_id, role)
+            # -- name/email live on `users`, reached through the row's OWN
+            # user_id alias one level deeper. Reading session["user_id"]["name"]
+            # (one level too shallow) always fell through to "Unknown User"
+            # silently, in every report this service ever generated.
+            mock_user_row = session.get("user_id") or {}
+            user_data = mock_user_row.get("user_id") or {}
+            user_name = user_data.get("name") or "Unknown User"
 
-            # Fetch questions
-            logger.debug(f"Fetching questions for session_id: {session_id}")
-            questions = self.supabase.table("mock_interview_questions").select("*").eq("session_id", session_id).order("question_number").execute()
-            if not questions.data:
-                logger.error(f"No questions found for session_id: {session_id}")
+            questions = self.supabase.table("mock_interview_questions").select("*").eq(
+                "session_id", session_id
+            ).order("question_number").execute().data or []
+            if not questions:
                 raise Exception(f"No questions found for session_id: {session_id}")
-            logger.debug(f"Fetched {len(questions.data)} questions")
 
-            # Fetch stress data
-            logger.debug(f"Fetching stress data for session_id: {session_id}")
-            stress_data = self.supabase.table("mock_interview_stress_analysis").select("*").eq("session_id", session_id).execute()
-            if not stress_data.data:
-                logger.warning(f"No stress analysis data found for session_id: {session_id}")
-                stress_dict = {}
-                stress_scores = []
-                average_stress = 0.0
-                average_stress_level = "Not Analyzed"
-            else:
-                stress_dict = {entry["question_number"]: entry for entry in stress_data.data}
-                stress_scores = [entry["stress_score"] for entry in stress_data.data if entry["stress_score"] is not None]
-                average_stress = sum(stress_scores) / len(stress_scores) if stress_scores else 0.0
-                average_stress_level = "High Stress" if average_stress > 60 else "Moderate Stress" if average_stress > 30 else "Low Stress"
-            logger.info(f"Average stress for session {session_id}: {average_stress} ({average_stress_level})")
+            answers = self.supabase.table("mock_interview_answers").select("*").eq(
+                "session_id", session_id
+            ).execute().data or []
+            answers_by_number = {a["question_number"]: a for a in answers}
 
-            # Fetch answers
-            logger.debug(f"Fetching answers for session_id: {session_id}")
-            answers = self.supabase.table("mock_interview_answers").select("*").eq("session_id", session_id).execute()
-            answers_dict = {entry["question_number"]: entry for entry in answers.data} if answers.data else {}
-            logger.debug(f"Fetched {len(answers.data) if answers.data else 0} answers")
-
-            # Generate question reports
             question_reports: List[QuestionReport] = []
-            answer_scores = []
-            for question in questions.data:
-                question_number = question["question_number"]
-                answer = answers_dict.get(question_number, {})
-                stress = stress_dict.get(question_number, {})
-                
-                question_report = QuestionReport(
-                    question_number=question_number,
+            weighted_score_sum = 0.0
+            weight_sum = 0.0
+            wpm_values: list[float] = []
+
+            for question in questions:
+                number = question["question_number"]
+                answer = answers_by_number.get(number, {})
+                score = answer.get("score")
+                tier = question.get("difficulty_tier") or 1
+
+                question_reports.append(QuestionReport(
+                    question_number=number,
                     question_text=question["question_text"],
-                    category=question["category"],
-                    answer_text=answer.get("answer_text", "No answer provided"),
-                    audio_url=answer.get("audio_url", None),
-                    score=answer.get("score", None),
-                    feedback=answer.get("feedback", "No feedback available"),
-                    stress_score=stress.get("stress_score", None),
-                    stress_level=stress.get("stress_level", "Not analyzed")
-                )
-                question_reports.append(question_report)
-                if answer.get("score") is not None:
-                    answer_scores.append(answer["score"])
+                    phase=_phase_of(question),
+                    difficulty_tier=question.get("difficulty_tier"),
+                    is_followup=question.get("parent_question_id") is not None,
+                    provenance=question.get("provenance"),
+                    answer_text=answer.get("answer_text"),
+                    audio_url=answer.get("audio_url"),
+                    score=score,
+                    rubric=answer.get("rubric"),
+                    feedback=answer.get("feedback"),
+                    duration_seconds=answer.get("duration_seconds"),
+                    wpm=answer.get("wpm"),
+                ))
 
-            """
-            The final score is the mean of the answer scores. Nothing else.
+                # Harder questions carry more weight -- a 7/10 at expert tier
+                # reflects more than a 9/10 at foundational. Unanswered
+                # questions are excluded entirely rather than scored as 0,
+                # same principle as the plain-mean version this replaces.
+                if score is not None:
+                    weighted_score_sum += score * tier
+                    weight_sum += tier
+                if answer.get("wpm") is not None:
+                    wpm_values.append(answer["wpm"])
 
-            It used to be multiplied by 0.8 or 0.9 depending on the "stress"
-            figure, and that was broken twice over:
+            final_score = (weighted_score_sum / weight_sum) if weight_sum > 0 else None
+            average_wpm = (sum(wpm_values) / len(wpm_values)) if wpm_values else None
+            answered_count = sum(1 for a in answers if a.get("answer_text"))
 
-            1. The heuristic in stress.py started every answer at a baseline of
-               50 and only ever added to it, so an answer delivered at a
-               perfectly comfortable 120-160 wpm scored exactly 50 -- which
-               lands in the `> 30` branch here. *Every* well-paced candidate
-               was silently docked 10%, and told their delivery was
-               "Moderate Stress" while they were doing nothing wrong.
-            2. Even correctly computed, speaking pace should not move a score
-               that claims to measure interview answers. Inferring emotional
-               state from a candidate is prohibited outright under EU AI Act
-               Article 5(1)(f) in workplace and educational settings, so pace
-               stays what it honestly is: private delivery feedback, reported
-               to the candidate and excluded from the score.
-            """
-            # No scored answers means there is no score -- not 5.0, which is
-            # what this returned before: a fabricated pass mark for a session
-            # in which the candidate never said anything.
-            avg_answer_score = sum(answer_scores) / len(answer_scores) if answer_scores else None
-            final_score = avg_answer_score
-            logger.info(f"Final score for session {session_id}: {final_score} over {len(answer_scores)} scored answers")
+            logger.info(
+                f"Final score for session {session_id}: {final_score} "
+                f"(difficulty-weighted over {int(weight_sum)} tier-weight)"
+            )
 
-            # Generate summary and recommendation using Grok with detailed prompts
-            logger.debug(f"Generating summary and recommendation for session_id: {session_id}")
-            # Prepare detailed data for the prompt
-            question_summary = "\n".join([
-                f"- Question {qr.question_number} ({qr.category}): "
-                f"Score {qr.score if qr.score is not None else 'not scored'}"
-                for qr in question_reports
-            ])
             score_line = (
-                f"{avg_answer_score:.1f} out of 10"
-                if avg_answer_score is not None
+                f"{final_score:.1f} out of 10 (difficulty-weighted)"
+                if final_score is not None
                 else "not scored -- no answers were recorded"
             )
-            # Speaking pace is deliberately absent from both prompts. It is
-            # delivery feedback shown privately to the candidate, not evidence
-            # the model should reason about when judging their answers.
-            session_facts = f"""Candidate: {user_name}
-Questions asked: {len(questions.data)}
-Questions answered: {len(answers_dict)}
-Average answer score: {score_line}
 
-Per question:
-{question_summary}"""
+            # Evidence and gaps the rubric already extracted, so the summary
+            # can cite specifics instead of restating scores in prose.
+            evidence_lines = []
+            for qr in question_reports:
+                if not qr.rubric:
+                    continue
+                quotes = qr.rubric.get("evidence_quotes") or []
+                gaps = qr.rubric.get("gaps") or []
+                if quotes:
+                    evidence_lines.append(f"- Q{qr.question_number} ({qr.phase}) said: " + "; ".join(quotes))
+                if gaps:
+                    evidence_lines.append(f"- Q{qr.question_number} ({qr.phase}) gap: " + "; ".join(gaps))
+
+            session_facts = f"""Candidate: {user_name}
+Target role: {session.get('target_role') or 'unspecified'}
+Questions asked: {len(questions)}
+Questions answered: {answered_count}
+Overall score: {score_line}
+
+Per-question evidence:
+{chr(10).join(evidence_lines) if evidence_lines else "(no rubric evidence recorded)"}"""
 
             summary_prompt = f"""Summarise this mock interview for the candidate, speaking to them directly.
 
 {session_facts}
 
-Write 2-3 sentences on how they did: what their answers showed, and where
-the weakest ones fell short. Be specific and do not invent detail that is
-not above."""
+Write 2-3 sentences on how they did, citing specific evidence above rather
+than restating the score. Do not invent detail that isn't in the evidence."""
 
             recommendation_prompt = f"""Give this candidate one actionable thing to work on before their next interview.
 
 {session_facts}
 
-Write 1-2 sentences, addressed to them, about answer quality -- what to do
-differently, not just what was wrong."""
-            # Default values in case Grok API fails
-            overall_summary = "Performance summary could not be generated due to an error."
-            recommendation = "Recommendation could not be generated due to an error."
+Write 1-2 sentences, addressed to them, about answer quality -- grounded in
+a specific gap from the evidence above, not a generic tip."""
+
+            overall_summary = f"{user_name} answered {answered_count} of {len(questions)} questions, scoring {score_line}."
             try:
-                # Attempt summary generation with Grok
-                summary_completion = self.groq_service.client.chat.completions.create(
+                completion = self.groq_service.client.chat.completions.create(
                     messages=[
                         {"role": "system", "content": "You are a helpful AI assistant that summarizes interview performance."},
-                        {"role": "user", "content": summary_prompt}
+                        {"role": "user", "content": summary_prompt},
                     ],
                     model=settings.LLM_MODEL,
-                    max_tokens=150,
-                    temperature=0.7
+                    max_tokens=200,
+                    temperature=0.7,
                 )
-                overall_summary = summary_completion.choices[0].message.content.strip()
-                logger.info(f"Generated summary: {overall_summary}")
+                overall_summary = completion.choices[0].message.content.strip()
             except Exception as e:
-                logger.error(f"Failed to generate summary via Grok API: {str(e)}")
-                overall_summary = (
-                    f"{user_name} answered {len(answers_dict)} of {len(questions.data)} questions, "
-                    f"scoring {score_line}."
-                )
+                logger.error(f"Failed to generate summary via Groq API: {e}")
 
+            if final_score is None:
+                recommendation = "Run the interview again and answer out loud so there's something to review."
+            elif final_score < 6:
+                recommendation = "Work on structure: state the situation, what you did, and the result, with concrete detail in each."
+            else:
+                recommendation = "Keep practising, and push for more specific evidence -- numbers, tools, outcomes -- in each answer."
             try:
-                # Attempt recommendation generation with Grok
-                recommendation_completion = self.groq_service.client.chat.completions.create(
+                completion = self.groq_service.client.chat.completions.create(
                     messages=[
                         {"role": "system", "content": "You are a helpful AI assistant that provides interview recommendations."},
-                        {"role": "user", "content": recommendation_prompt}
+                        {"role": "user", "content": recommendation_prompt},
                     ],
                     model=settings.LLM_MODEL,
                     max_tokens=150,
-                    temperature=0.7
+                    temperature=0.7,
                 )
-                recommendation = recommendation_completion.choices[0].message.content.strip()
-                logger.info(f"Generated recommendation: {recommendation}")
+                recommendation = completion.choices[0].message.content.strip()
             except Exception as e:
-                logger.error(f"Failed to generate recommendation via Grok API: {str(e)}")
-                # `avg_answer_score < 6` was compared unguarded, so this
-                # fallback -- the path taken precisely when the model is
-                # already failing -- raised TypeError on any session with no
-                # scored answers, turning a degraded report into a 500.
-                if avg_answer_score is None:
-                    recommendation = "Run the interview again and answer out loud so there's something to review."
-                elif avg_answer_score < 6:
-                    recommendation = "Work on structure: state the situation, what you did, and the result, with concrete detail in each."
-                else:
-                    recommendation = "Keep practising, and push for more specific evidence -- numbers, tools, outcomes -- in each answer."
+                logger.error(f"Failed to generate recommendation via Groq API: {e}")
 
-            # Insert the report into the database with upsert to avoid duplicates
-            logger.debug(f"Upserting report into mock_interview_reports for session_id: {session_id}")
-            report_data = {
+            self.supabase.table("mock_interview_reports").upsert({
                 "session_id": session_id,
                 "overall_summary": overall_summary,
                 "final_score": final_score,
                 "recommendation": recommendation,
-                "average_stress_score": average_stress,
-                "average_stress_level": average_stress_level,
-                "created_at": datetime.utcnow().isoformat()
-            }
-            try:
-                # Attempt upsert with all fields
-                self.supabase.table("mock_interview_reports").upsert(
-                    report_data,
-                    on_conflict=["session_id"]
-                ).execute()
-                logger.info(f"Successfully upserted report to mock_interview_reports for session_id: {session_id}")
-            except Exception as e:
-                logger.error(f"Upsert failed: {str(e)}")
-                # Fallback: Try upsert without stress columns if they are missing in schema
-                if "column" in str(e).lower() and ("average_stress_score" in str(e).lower() or "average_stress_level" in str(e).lower()):
-                    logger.warning(f"Columns average_stress_score/average_stress_level not found in mock_interview_reports, saving without them")
-                    reduced_report_data = {
-                        "session_id": session_id,
-                        "overall_summary": overall_summary,
-                        "final_score": final_score,
-                        "recommendation": recommendation,
-                        "created_at": datetime.utcnow().isoformat()
-                    }
-                    self.supabase.table("mock_interview_reports").upsert(
-                        reduced_report_data,
-                        on_conflict=["session_id"]
-                    ).execute()
-                    logger.info(f"Successfully upserted report (without stress columns) for session_id: {session_id}")
-                else:
-                    logger.error(f"Failed to upsert report into mock_interview_reports: {str(e)}")
-                    raise Exception(f"Failed to save report to database: {str(e)}")
+                "created_at": datetime.utcnow().isoformat(),
+            }, on_conflict=["session_id"]).execute()
 
-            logger.info(f"Successfully generated final report for session_id: {session_id}")
             return FinalReportResponse(
                 session_id=session_id,
+                target_role=session.get("target_role"),
+                company=session.get("company"),
                 questions=question_reports,
-                average_stress=average_stress,
-                average_stress_level=average_stress_level,
+                average_pace_wpm=average_wpm,
+                pace_label=pace_label(average_wpm),
                 overall_summary=overall_summary,
                 final_score=final_score,
-                recommendation=recommendation
+                recommendation=recommendation,
             )
 
         except Exception as e:
-            logger.error(f"Failed to generate final report for session_id {session_id}: {str(e)}")
-            raise Exception(f"Failed to generate final report: {str(e)}")
+            logger.error(f"Failed to generate final report for session_id {session_id}: {e}", exc_info=True)
+            raise Exception(f"Failed to generate final report: {e}")
 
     def generate_user_summary(self, mock_user_id: str) -> UserSummaryResponse:
-        """Generate a summary of a user's interview performance across all sessions."""
+        """Summary of a user's interview performance across all sessions."""
         logger.info(f"Generating user summary for mock_user_id: {mock_user_id}")
         try:
-            # Validate mock_user_id format (must be a valid UUID)
-            import uuid
             try:
                 uuid.UUID(mock_user_id)
             except ValueError:
-                logger.error(f"Invalid mock_user_id format: {mock_user_id}")
                 raise ValueError("Invalid mock_user_id format. Must be a valid UUID.")
 
-            # Fetch user details to verify role
-            user = self.supabase.table("mock_interview_users").select(
-                "*, user_id:users(user_id, name, email, role)"
-            ).eq("user_id", mock_user_id).execute()
-            if not user.data:
-                logger.info(f"No user found for mock_user_id: {mock_user_id}")
-                return UserSummaryResponse(
-                    mock_user_id=mock_user_id,
-                    total_sessions=0,
-                    average_stress_trend=[],
-                    weakest_question_types={},
-                    progress_over_time={}
-                )
-            user_data = user.data[0]
-            user_role = user_data.get("user_id", {}).get("role", "student")
+            sessions = self.supabase.table("mock_interview_sessions").select("*").eq(
+                "user_id", mock_user_id
+            ).order("start_time").execute().data or []
 
-            # Fetch all sessions for the user
-            sessions = self.supabase.table("mock_interview_sessions").select("*").eq("user_id", mock_user_id).order("start_time").execute()
-            if not sessions.data:
-                logger.info(f"No sessions found for mock_user_id: {mock_user_id}")
+            if not sessions:
                 return UserSummaryResponse(
-                    mock_user_id=mock_user_id,
-                    total_sessions=0,
-                    average_stress_trend=[],
-                    weakest_question_types={},
-                    progress_over_time={}
+                    mock_user_id=mock_user_id, total_sessions=0,
+                    weakest_phases={}, progress_over_time={},
                 )
 
-            total_sessions = len(sessions.data)
-            session_stats = []
-            average_stress_trend = []
-            category_data = {}  # To track scores and counts per question type
-            progress_over_time = {"stress": [], "answer_score": []}
+            phase_totals: dict[str, dict[str, float]] = {}
+            answer_score_trend: list[float] = []
 
-            for session in sessions.data:
+            for session in sessions:
                 session_id = session["id"]
-                start_time = session["start_time"]
 
-                # Fetch questions, answers, and stress data for the session
-                questions = self.supabase.table("mock_interview_questions").select("*").eq("session_id", session_id).order("question_number").execute()
-                total_questions = len(questions.data) if questions.data else 0
+                questions = self.supabase.table("mock_interview_questions").select("*").eq(
+                    "session_id", session_id
+                ).execute().data or []
+                answers = self.supabase.table("mock_interview_answers").select("*").eq(
+                    "session_id", session_id
+                ).execute().data or []
+                answers_by_number = {a["question_number"]: a for a in answers}
 
-                answers = self.supabase.table("mock_interview_answers").select("*").eq("session_id", session_id).execute()
-                questions_attempted = len(answers.data) if answers.data else 0
+                scores_this_session = [a["score"] for a in answers if a.get("score") is not None]
+                if scores_this_session:
+                    answer_score_trend.append(sum(scores_this_session) / len(scores_this_session))
 
-                stress_data = self.supabase.table("mock_interview_stress_analysis").select("*").eq("session_id", session_id).execute()
-                stress_scores = [entry["stress_score"] for entry in stress_data.data if entry["stress_score"] is not None] if stress_data.data else []
-                average_stress = sum(stress_scores) / len(stress_scores) if stress_scores else 0.0
-                average_stress_trend.append(average_stress)
+                for question in questions:
+                    answer = answers_by_number.get(question["question_number"])
+                    if not answer or answer.get("score") is None:
+                        continue
+                    phase = _phase_of(question)
+                    bucket = phase_totals.setdefault(phase, {"total_score": 0.0, "count": 0})
+                    bucket["total_score"] += answer["score"]
+                    bucket["count"] += 1
 
-                answer_scores = [entry["score"] for entry in answers.data if entry["score"] is not None]
-                average_answer_score = sum(answer_scores) / len(answer_scores) if answer_scores else None
-
-                # Track performance by question category
-                for question in questions.data:
-                    category = question["category"]
-                    question_number = question["question_number"]
-                    answer = next((a for a in answers.data if a["question_number"] == question_number), None)
-                    stress = next((s for s in stress_data.data if s["question_number"] == question_number), None)
-
-                    # Use stress score if available, otherwise use inverted answer score
-                    score = stress["stress_score"] if stress and stress["stress_score"] is not None else (10 - answer["score"] if answer and answer["score"] is not None else 5.0)
-                    
-                    # Update category data
-                    if category not in category_data:
-                        category_data[category] = {"total_score": 0.0, "count": 0}
-                    category_data[category]["total_score"] += score
-                    category_data[category]["count"] += 1
-
-                session_stats.append(SessionStats(
-                    session_id=session_id,
-                    created_at=start_time,
-                    average_stress=average_stress,
-                    average_answer_score=average_answer_score,
-                    questions_attempted=questions_attempted,
-                    total_questions=total_questions
-                ))
-                progress_over_time["stress"].append(average_stress)
-                if average_answer_score is not None:
-                    progress_over_time["answer_score"].append(average_answer_score)
-
-            # Compute weakest question types with additional context
-            weakest_question_types = {
-                category: {
-                    "average_score": data["total_score"] / data["count"],
-                    "question_count": data["count"]
-                }
-                for category, data in category_data.items()
+            weakest_phases = {
+                phase: CategoryPerformance(
+                    average_score=data["total_score"] / data["count"],
+                    question_count=int(data["count"]),
+                )
+                for phase, data in phase_totals.items()
             }
 
-            # Compute progress over time (difference between first and last session)
-            progress = {}
-            if len(progress_over_time["stress"]) > 1:
-                progress["stress_improvement"] = progress_over_time["stress"][0] - progress_over_time["stress"][-1]
-            else:
-                progress["stress_improvement"] = 0.0
-            if len(progress_over_time["answer_score"]) > 1:
-                progress["answer_score_improvement"] = progress_over_time["answer_score"][-1] - progress_over_time["answer_score"][0]
-            else:
-                progress["answer_score_improvement"] = 0.0
+            progress = {
+                "answer_score_improvement": (
+                    answer_score_trend[-1] - answer_score_trend[0]
+                    if len(answer_score_trend) > 1 else 0.0
+                ),
+            }
 
-            logger.info(f"Successfully generated user summary for mock_user_id: {mock_user_id}")
             return UserSummaryResponse(
                 mock_user_id=mock_user_id,
-                total_sessions=total_sessions,
-                average_stress_trend=average_stress_trend,
-                weakest_question_types=weakest_question_types,
-                progress_over_time=progress
+                total_sessions=len(sessions),
+                weakest_phases=weakest_phases,
+                progress_over_time=progress,
             )
 
         except Exception as e:
-            logger.error(f"Failed to generate user summary for mock_user_id {mock_user_id}: {str(e)}")
-            raise Exception(f"Failed to generate user summary: {str(e)}")
+            logger.error(f"Failed to generate user summary for mock_user_id {mock_user_id}: {e}")
+            raise Exception(f"Failed to generate user summary: {e}")
